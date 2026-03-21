@@ -1,0 +1,19 @@
+[project]
+# Novo nome e descrição
+name = "percival-image-creator-mcp"
+version = "0.1.0"
+description = "Agnostic Model Context Protocol (MCP) server for Image Generation and Analysis, optimized for Venice.ai and nanobot."
+readme = "README.md"
+requires-python = ">=3.10"
+
+# As dependências originais são mantidas. 
+# Usaremos o pacote 'openai' como nosso cliente genérico para o Venice.ai!
+dependencies = [
+    "mcp[cli]>=1.0.0",
+    "openai>=1.0.0",
+    "pillow>=10.0.0",
+    "requests>=2.31.0"
+]
+
+[project.scripts]
+jarvina-mcp = "main:main"
