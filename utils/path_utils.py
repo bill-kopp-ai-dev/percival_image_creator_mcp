@@ -2,6 +2,99 @@ from pathlib import Path
 from typing import Tuple, Optional
 import os
 
+
+def _env_bool(var_name: str, default: bool) -> bool:
+    raw = os.getenv(var_name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _is_relative_to(path: Path, base: Path) -> bool:
+    try:
+        path.relative_to(base)
+        return True
+    except ValueError:
+        return False
+
+
+def get_allowed_working_roots() -> list[Path]:
+    """
+    Return allowed roots for working_dir containment.
+
+    Environment:
+      - PERCIVAL_IMAGE_MCP_ALLOWED_ROOTS: comma-separated absolute paths.
+      - PERCIVAL_IMAGE_MCP_DISABLE_ROOT_SANDBOX: when true, disables root containment.
+    """
+    if _env_bool("PERCIVAL_IMAGE_MCP_DISABLE_ROOT_SANDBOX", False):
+        return []
+
+    raw = os.getenv("PERCIVAL_IMAGE_MCP_ALLOWED_ROOTS", "").strip()
+    roots: list[Path] = []
+
+    if raw:
+        candidates = [item.strip() for item in raw.split(",") if item.strip()]
+        for candidate in candidates:
+            path = Path(candidate).expanduser()
+            if not path.is_absolute():
+                continue
+            try:
+                roots.append(path.resolve(strict=True))
+            except Exception:
+                # Ignore invalid roots; validation function will fail if no valid roots remain.
+                continue
+        return roots
+
+    # Secure-by-default fallback: confine working_dir to current process working directory.
+    try:
+        return [Path(os.getcwd()).resolve(strict=True)]
+    except Exception:
+        return []
+
+
+def validate_working_directory(working_dir: str) -> Tuple[Optional[Path], Optional[str]]:
+    """
+    Validate working_dir and enforce root containment policy.
+    """
+    working_path = Path(working_dir).expanduser()
+    if not working_path.is_absolute():
+        return None, f"Error: working_dir must be an absolute path, got: {working_dir}"
+    if not working_path.exists():
+        return None, f"Error: working_dir does not exist: {working_dir}"
+    if not working_path.is_dir():
+        return None, f"Error: working_dir is not a directory: {working_dir}"
+
+    try:
+        resolved_working = working_path.resolve(strict=True)
+    except Exception as exc:
+        return None, f"Error: failed to resolve working_dir '{working_dir}': {exc}"
+
+    if _env_bool("PERCIVAL_IMAGE_MCP_DISABLE_ROOT_SANDBOX", False):
+        return resolved_working, None
+
+    allowed_roots = get_allowed_working_roots()
+    if not allowed_roots:
+        return None, (
+            "Error: no valid allowed roots configured for working_dir sandbox. "
+            "Set PERCIVAL_IMAGE_MCP_ALLOWED_ROOTS with absolute existing directories."
+        )
+
+    if not any(_is_relative_to(resolved_working, root) for root in allowed_roots):
+        allowed_display = ", ".join(str(root) for root in allowed_roots)
+        return None, (
+            "Error: working_dir is outside allowed roots.\n"
+            f"• working_dir: '{resolved_working}'\n"
+            f"• allowed_roots: '{allowed_display}'"
+        )
+
+    return resolved_working, None
+
+
 def resolve_path(file_path: str, base_dir: str) -> Path:
     """
     Handle both relative and absolute paths for image files.

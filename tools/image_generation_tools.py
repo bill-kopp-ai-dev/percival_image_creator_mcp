@@ -1,126 +1,1971 @@
+import json
+import inspect
+import time
+import re
+import os
+import difflib
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
+from uuid import uuid4
 from server import mcp
 from utils.client import jarvina_client as client
 from utils.client import (
+    generate_images_with_transport,
+    get_jarvina_base_url,
+    get_image_info,
+    list_provider_image_styles,
     save_base64_image,
     download_image_from_url
 )
+from utils.model_catalog import (
+    ModelCatalogError,
+    find_alternatives as catalog_find_alternatives,
+    get_catalog_metadata,
+    get_model_card as catalog_get_model_card,
+    list_model_cards as catalog_list_model_cards,
+)
+from utils.nanobot_profile import (
+    CONTRACT_VERSION,
+    SERVER_NAME,
+    build_nanobot_profile,
+)
+from utils.path_utils import get_allowed_working_roots, validate_image_path, validate_working_directory
+from utils.security_utils import (
+    clear_security_metrics as clear_security_metrics_snapshot,
+    get_security_metrics_snapshot,
+    redact_sensitive_structure,
+    redact_sensitive_text,
+    record_security_event,
+)
+from utils.venice_image_payload import (
+    build_venice_generation_request,
+    parse_parameter_overrides_json,
+)
 
-@mcp.tool()
-def list_available_models() -> str:
+MODEL_LIST_CACHE_TTL_SECONDS = 300
+STYLE_LIST_CACHE_TTL_SECONDS = 300
+_provider_models_cache: dict[str, Any] = {
+    "model_ids": [],
+    "fetched_at": None,
+    "expires_at": 0.0,
+}
+_provider_styles_cache: dict[str, Any] = {
+    "styles": [],
+    "fetched_at": None,
+    "expires_at": 0.0,
+}
+
+DEFAULT_CARD_FIELDS = (
+    "id",
+    "name",
+    "task_types",
+    "quality_tier",
+    "speed_tier",
+    "pricing",
+    "recommended_api_params",
+    "status",
+)
+_ALLOWED_CARD_FIELDS = {
+    "id",
+    "name",
+    "description",
+    "task_types",
+    "status",
+    "capabilities",
+    "pricing",
+    "quality_tier",
+    "speed_tier",
+    "recommended_use_cases",
+    "avoid_use_cases",
+    "aliases",
+    "cost_per_image",
+    "cost_per_edit",
+    "recommended_api_params",
+}
+
+MAX_EDIT_IMAGES_PER_REQUEST = 10
+DEFAULT_MAX_PROMPT_CHARS = 4000
+DEFAULT_MAX_NEGATIVE_PROMPT_CHARS = 2000
+DEFAULT_MAX_FILENAME_PREFIX_CHARS = 80
+DEFAULT_MAX_MODEL_ID_CHARS = 128
+DEFAULT_MAX_LIST_FILES = 200
+DEFAULT_OUTPUT_DIRECTORY = "/home/bill-kopp/Pictures"
+_SAFE_FILENAME_PREFIX_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_SAFE_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _new_request_id() -> str:
+    return f"img-{int(time.time() * 1000)}-{uuid4().hex[:12]}"
+
+
+def _env_int(var_name: str, default: int, minimum: int = 1) -> int:
+    raw = os.getenv(var_name)
+    if raw is None:
+        return default
+    try:
+        parsed = int(raw.strip())
+    except Exception:
+        return default
+    return max(minimum, parsed)
+
+
+def _env_bool(var_name: str, default: bool) -> bool:
+    raw = os.getenv(var_name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _is_relative_to(path: Path, base: Path) -> bool:
+    try:
+        path.relative_to(base)
+        return True
+    except ValueError:
+        return False
+
+
+def _resolve_path_in_working_dir(
+    path_value: str,
+    working_path: Path,
+    label: str
+) -> tuple[Optional[Path], Optional[str]]:
+    candidate = Path(path_value.strip())
+    if not candidate.is_absolute():
+        candidate = working_path / candidate
+
+    resolved_candidate = candidate.resolve(strict=False)
+    if not _is_relative_to(resolved_candidate, working_path):
+        record_security_event(
+            "path_escape_blocked",
+            {
+                "label": label,
+                "provided_path": path_value,
+                "resolved_path": str(resolved_candidate),
+                "working_dir": str(working_path),
+            },
+        )
+        return (
+            None,
+            (
+                f"Error: {label} must resolve inside working_dir.\n"
+                f"• Provided: '{path_value}'\n"
+                f"• Resolved: '{resolved_candidate}'\n"
+                f"• working_dir: '{working_path}'"
+            ),
+        )
+    return resolved_candidate, None
+
+
+def _get_default_output_directory() -> Path:
+    configured = (os.getenv("PERCIVAL_IMAGE_MCP_DEFAULT_OUTPUT_DIR") or DEFAULT_OUTPUT_DIRECTORY).strip()
+    return Path(configured).expanduser().resolve(strict=False)
+
+
+def _resolve_output_path(
+    path_value: str,
+    working_path: Path,
+    label: str,
+) -> tuple[Optional[Path], Optional[str]]:
+    raw_candidate = Path(path_value.strip()).expanduser()
+    is_absolute_input = raw_candidate.is_absolute()
+    candidate = raw_candidate if is_absolute_input else (working_path / raw_candidate)
+    resolved_candidate = candidate.resolve(strict=False)
+    default_output_root = _get_default_output_directory()
+
+    if _is_relative_to(resolved_candidate, working_path):
+        return resolved_candidate, None
+
+    # Allow default output root only when caller provided an absolute path.
+    if is_absolute_input and _is_relative_to(resolved_candidate, default_output_root):
+        return resolved_candidate, None
+
+    record_security_event(
+        "path_escape_blocked",
+        {
+            "label": label,
+            "provided_path": path_value,
+            "resolved_path": str(resolved_candidate),
+            "working_dir": str(working_path),
+            "default_output_root": str(default_output_root),
+        },
+    )
+    return (
+        None,
+        (
+            f"Error: {label} must resolve inside working_dir or default output directory.\n"
+            f"• Provided: '{path_value}'\n"
+            f"• Resolved: '{resolved_candidate}'\n"
+            f"• working_dir: '{working_path}'\n"
+            f"• default_output_dir: '{default_output_root}'"
+        ),
+    )
+
+
+def _enforce_existing_file_in_working_dir(
+    resolved_path: Path,
+    working_path: Path,
+    label: str,
+    provided_path: str
+) -> tuple[Optional[Path], Optional[str]]:
+    try:
+        normalized = resolved_path.resolve(strict=True)
+    except Exception as exc:
+        return (
+            None,
+            (
+                f"Error: failed to resolve {label}.\n"
+                f"• Provided: '{provided_path}'\n"
+                f"• Error: {exc}"
+            ),
+        )
+
+    if not _is_relative_to(normalized, working_path):
+        record_security_event(
+            "path_escape_blocked",
+            {
+                "label": label,
+                "provided_path": provided_path,
+                "resolved_path": str(normalized),
+                "working_dir": str(working_path),
+            },
+        )
+        return (
+            None,
+            (
+                f"Error: {label} must be inside working_dir.\n"
+                f"• Provided: '{provided_path}'\n"
+                f"• Resolved: '{normalized}'\n"
+                f"• working_dir: '{working_path}'"
+            ),
+        )
+    return normalized, None
+
+
+def _sanitize_text_with_limit(
+    value: str,
+    *,
+    field_name: str,
+    max_chars: int,
+    allow_empty: bool = False,
+) -> tuple[Optional[str], Optional[str]]:
+    normalized = (value or "").strip()
+    if not normalized and not allow_empty:
+        return None, f"{field_name} must be a non-empty string."
+    if len(normalized) > max_chars:
+        record_security_event(
+            "input_validation_blocked",
+            {"field": field_name, "reason": "too_long", "max_chars": max_chars, "input_len": len(normalized)},
+        )
+        return None, f"{field_name} exceeds max length of {max_chars} characters."
+    return normalized, None
+
+
+def _validate_filename_prefix(filename_prefix: str) -> Optional[str]:
+    max_chars = _env_int("PERCIVAL_IMAGE_MCP_MAX_FILENAME_PREFIX_CHARS", DEFAULT_MAX_FILENAME_PREFIX_CHARS)
+    normalized = (filename_prefix or "").strip()
+    if not normalized:
+        return "filename_prefix must be a non-empty string."
+    if len(normalized) > max_chars:
+        record_security_event(
+            "input_validation_blocked",
+            {"field": "filename_prefix", "reason": "too_long", "max_chars": max_chars},
+        )
+        return f"filename_prefix exceeds max length of {max_chars} characters."
+    if not _SAFE_FILENAME_PREFIX_RE.fullmatch(normalized):
+        record_security_event(
+            "input_validation_blocked",
+            {"field": "filename_prefix", "reason": "invalid_characters"},
+        )
+        return "filename_prefix contains invalid characters. Use only letters, numbers, '.', '_' or '-'."
+    return None
+
+
+def _validate_model_id(model_id: str) -> Optional[str]:
+    max_chars = _env_int("PERCIVAL_IMAGE_MCP_MAX_MODEL_ID_CHARS", DEFAULT_MAX_MODEL_ID_CHARS)
+    normalized = (model_id or "").strip()
+    if not normalized:
+        return "model must be a non-empty string."
+    if len(normalized) > max_chars:
+        record_security_event(
+            "input_validation_blocked",
+            {"field": "model", "reason": "too_long", "max_chars": max_chars},
+        )
+        return f"model exceeds max length of {max_chars} characters."
+    if not _SAFE_MODEL_ID_RE.fullmatch(normalized):
+        record_security_event(
+            "input_validation_blocked",
+            {"field": "model", "reason": "invalid_characters"},
+        )
+        return "model contains invalid characters."
+    return None
+
+
+def _get_provider_model_ids(force_refresh: bool = False) -> tuple[list[str], str, bool]:
     """
-    Lista todos os modelos de geração de imagem disponíveis no provedor atual (ex: Venice.ai).
-    O LLM DEVE chamar esta função antes de gerar uma imagem se não souber o nome exato do modelo.
+    Fetch model ids from provider with short-lived cache.
+
+    Returns:
+        tuple[model_ids, fetched_at_iso, used_cache]
+    """
+    now_ts = time.time()
+    if (
+        not force_refresh
+        and _provider_models_cache["model_ids"]
+        and now_ts < float(_provider_models_cache["expires_at"])
+    ):
+        return (
+            list(_provider_models_cache["model_ids"]),
+            str(_provider_models_cache["fetched_at"]),
+            True,
+        )
+
+    models = client.models.list()
+    model_ids = sorted(
+        {
+            model.id
+            for model in models.data
+            if hasattr(model, "id") and isinstance(model.id, str) and model.id.strip()
+        }
+    )
+    fetched_at = _utc_now_iso()
+    _provider_models_cache["model_ids"] = model_ids
+    _provider_models_cache["fetched_at"] = fetched_at
+    _provider_models_cache["expires_at"] = now_ts + MODEL_LIST_CACHE_TTL_SECONDS
+    return model_ids, fetched_at, False
+
+
+def _normalize_style_value(value: str) -> str:
+    return (value or "").strip().lower()
+
+
+def _get_provider_image_styles(force_refresh: bool = False) -> tuple[list[dict[str, Any]], str, bool]:
+    """
+    Fetch image style presets from provider with short-lived cache.
+
+    Returns:
+        tuple[styles, fetched_at_iso, used_cache]
+    """
+    now_ts = time.time()
+    if (
+        not force_refresh
+        and _provider_styles_cache["styles"]
+        and now_ts < float(_provider_styles_cache["expires_at"])
+    ):
+        return (
+            list(_provider_styles_cache["styles"]),
+            str(_provider_styles_cache["fetched_at"]),
+            True,
+        )
+
+    styles = list_provider_image_styles()
+    fetched_at = _utc_now_iso()
+    _provider_styles_cache["styles"] = styles
+    _provider_styles_cache["fetched_at"] = fetched_at
+    _provider_styles_cache["expires_at"] = now_ts + STYLE_LIST_CACHE_TTL_SECONDS
+    return styles, fetched_at, False
+
+
+def _build_style_validation_payload(
+    style_preset: str,
+    *,
+    force_refresh: bool = False,
+) -> dict[str, Any]:
+    checked_at = _utc_now_iso()
+    selected = style_preset.strip()
+    normalized_selected = _normalize_style_value(selected)
+    try:
+        styles, fetched_at, used_cache = _get_provider_image_styles(force_refresh=force_refresh)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "style_preset": selected,
+            "error": f"Falha ao consultar estilos no provedor: {exc}",
+            "checked_at": checked_at,
+        }
+
+    normalized_map: dict[str, str] = {}
+    all_names: list[str] = []
+    for entry in styles:
+        style_id = str(entry.get("id") or "").strip()
+        style_name = str(entry.get("name") or "").strip()
+        if style_id:
+            normalized_map[_normalize_style_value(style_id)] = style_id
+            all_names.append(style_id)
+        if style_name:
+            normalized_map[_normalize_style_value(style_name)] = style_name
+            all_names.append(style_name)
+
+    available = normalized_selected in normalized_map
+    suggestions = difflib.get_close_matches(selected, all_names, n=5, cutoff=0.45) if all_names else []
+
+    payload = {
+        "ok": True,
+        "style_preset": selected,
+        "available": available,
+        "availability_state": "available" if available else "unavailable",
+        "matched_style": normalized_map.get(normalized_selected),
+        "suggestions": suggestions,
+        "provider_check": {
+            "provider_base_url": get_jarvina_base_url(),
+            "fetched_at": fetched_at,
+            "used_cache": used_cache,
+            "provider_style_count": len(styles),
+            "ttl_seconds": STYLE_LIST_CACHE_TTL_SECONDS,
+        },
+        "checked_at": checked_at,
+    }
+    if available:
+        payload["recommendation"] = f"Style preset '{selected}' is available."
+    else:
+        payload["recommendation"] = "Escolha um style_preset válido da lista de estilos do provedor."
+    return payload
+
+
+def _json_response(payload: dict[str, Any]) -> str:
+    # Compact JSON helps avoid nanobot tool-result truncation.
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def _success_response(
+    data: dict[str, Any],
+    legacy_text: Optional[str] = None,
+    request_id: Optional[str] = None,
+    tool_name: Optional[str] = None
+) -> str:
+    effective_request_id = request_id or _new_request_id()
+    frame = inspect.currentframe()
+    caller_name = frame.f_back.f_code.co_name if frame and frame.f_back else "unknown_tool"
+    effective_tool_name = tool_name or caller_name
+    payload: dict[str, Any] = {"ok": True, "data": data}
+    payload["request_id"] = effective_request_id
+    payload["meta"] = {
+        "server": SERVER_NAME,
+        "contract_version": CONTRACT_VERSION,
+        "request_id": effective_request_id,
+        "timestamp": _utc_now_iso(),
+        "tool": effective_tool_name,
+    }
+    if legacy_text:
+        payload["legacy_text"] = legacy_text
+    return _json_response(payload)
+
+
+def _error_response(
+    error: str,
+    code: str = "tool_error",
+    details: Optional[dict[str, Any]] = None,
+    legacy_text: Optional[str] = None,
+    request_id: Optional[str] = None,
+    tool_name: Optional[str] = None
+) -> str:
+    effective_request_id = request_id or _new_request_id()
+    frame = inspect.currentframe()
+    caller_name = frame.f_back.f_code.co_name if frame and frame.f_back else "unknown_tool"
+    effective_tool_name = tool_name or caller_name
+    safe_error = redact_sensitive_text(error)
+    safe_legacy = redact_sensitive_text(legacy_text) if legacy_text else None
+    safe_details = redact_sensitive_structure(details) if details is not None else None
+    payload: dict[str, Any] = {"ok": False, "error": error, "code": code}
+    payload["error"] = safe_error
+    payload["request_id"] = effective_request_id
+    payload["meta"] = {
+        "server": SERVER_NAME,
+        "contract_version": CONTRACT_VERSION,
+        "request_id": effective_request_id,
+        "timestamp": _utc_now_iso(),
+        "tool": effective_tool_name,
+    }
+    if safe_details is not None:
+        payload["details"] = safe_details
+    if safe_legacy:
+        payload["legacy_text"] = safe_legacy
+    return _json_response(payload)
+
+
+def _normalize_task_type(value: str) -> str:
+    normalized = (value or "").strip().lower().replace(" ", "_")
+    aliases = {
+        "generate": "text_to_image",
+        "generation": "text_to_image",
+        "text2image": "text_to_image",
+        "edit": "image_edit",
+        "inpaint": "image_edit",
+        "upscale": "upscaling",
+        "remove_background": "background_removal",
+        "background_remove": "background_removal",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def _normalize_model_identifier(value: str) -> str:
+    return (value or "").strip().lower().replace("_", "-")
+
+
+def _catalog_provider_overlap_count(provider_ids: list[str]) -> int:
+    """
+    Count how many active catalog model IDs (or aliases) are visible in provider /models.
+
+    Some providers expose a generic model list that does not include image models.
+    When overlap is zero, strict availability checks based only on /models become unreliable.
     """
     try:
-        models = client.models.list()
-        model_names = [model.id for model in models.data]
-        if not model_names:
-            return "Nenhum modelo encontrado no provedor atual."
-        return "Modelos disponíveis para uso:\n- " + "\n- ".join(model_names)
+        catalog_cards = catalog_list_model_cards(task_type=None, include_inactive=False)
+    except Exception:
+        return 0
+
+    provider_exact = set(provider_ids)
+    provider_norm = {_normalize_model_identifier(model_id) for model_id in provider_ids}
+
+    overlap = 0
+    for card in catalog_cards:
+        candidates: list[str] = []
+        card_id = card.get("id")
+        if isinstance(card_id, str) and card_id.strip():
+            candidates.append(card_id.strip())
+
+        aliases = card.get("aliases", [])
+        if isinstance(aliases, list):
+            for alias in aliases:
+                if isinstance(alias, str) and alias.strip():
+                    candidates.append(alias.strip())
+
+        if any(
+            candidate in provider_exact
+            or _normalize_model_identifier(candidate) in provider_norm
+            for candidate in candidates
+        ):
+            overlap += 1
+
+    return overlap
+
+
+def _normalize_limit_offset(limit: int, offset: int, max_limit: int = 100) -> tuple[int, int]:
+    safe_limit = max(1, min(int(limit), max_limit))
+    safe_offset = max(0, int(offset))
+    return safe_limit, safe_offset
+
+
+def _parse_card_fields(fields: Optional[str]) -> tuple[list[str], Optional[str]]:
+    if not fields or not fields.strip():
+        return list(DEFAULT_CARD_FIELDS), None
+
+    requested = [item.strip() for item in fields.split(",") if item.strip()]
+    if not requested:
+        return list(DEFAULT_CARD_FIELDS), None
+
+    unknown = [field for field in requested if field not in _ALLOWED_CARD_FIELDS]
+    if unknown:
+        return [], f"Unknown fields requested: {', '.join(sorted(set(unknown)))}"
+
+    # Deduplicate while keeping order.
+    unique_fields = list(dict.fromkeys(requested))
+    return unique_fields, None
+
+
+def _project_card_fields(card: dict[str, Any], fields: list[str]) -> dict[str, Any]:
+    return {field: card.get(field) for field in fields}
+
+
+def _validate_working_dir(working_dir: str) -> tuple[Optional[Path], Optional[str]]:
+    return validate_working_directory(working_dir)
+
+
+def _save_images_from_response(response: Any, output_path: Path, filename_prefix: str) -> tuple[list[str], Optional[str]]:
+    data_items = getattr(response, "data", None)
+    if not data_items:
+        return [], "Error: Provider response does not contain image data."
+
+    saved_files: list[str] = []
+    timestamp = int(time.time())
+
+    for i, image_data in enumerate(data_items):
+        filename = f"{filename_prefix}_{timestamp}_{i+1}.png"
+        file_path = output_path / filename
+
+        if hasattr(image_data, "b64_json") and image_data.b64_json:
+            if save_base64_image(image_data.b64_json, file_path):
+                saved_files.append(str(file_path))
+            else:
+                return [], f"Error: Failed to save image {i+1}"
+        elif hasattr(image_data, "url") and image_data.url:
+            if download_image_from_url(image_data.url, file_path):
+                saved_files.append(str(file_path))
+            else:
+                return [], f"Error: Failed to download image {i+1} from URL"
+        else:
+            return [], f"Error: No image payload found for image {i+1}"
+
+    return saved_files, None
+
+
+def _build_model_availability_payload(
+    model_id: str,
+    task_type: str = "text_to_image",
+    force_refresh: bool = False,
+    include_alternatives: bool = True
+) -> dict[str, Any]:
+    checked_at = _utc_now_iso()
+    selected_model_id = model_id.strip()
+    normalized_task_type = _normalize_task_type(task_type)
+
+    try:
+        provider_ids, fetched_at, used_cache = _get_provider_model_ids(force_refresh=force_refresh)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "model_id": selected_model_id,
+            "task_type": normalized_task_type,
+            "error": f"Falha ao consultar modelos no provedor: {exc}",
+            "checked_at": checked_at,
+        }
+
+    provider_id_set = set(provider_ids)
+    provider_norm_set = {_normalize_model_identifier(model_id) for model_id in provider_ids}
+    card = None
+    catalog_error = None
+    task_type_matches_card = None
+    try:
+        card = catalog_get_model_card(selected_model_id)
+        if card:
+            task_type_matches_card = normalized_task_type in card.get("task_types", [])
+    except Exception as exc:
+        catalog_error = str(exc)
+
+    lookup_candidates = [selected_model_id]
+    if card:
+        canonical_id = str(card.get("id") or "").strip()
+        if canonical_id:
+            lookup_candidates.append(canonical_id)
+
+        aliases = card.get("aliases", [])
+        if isinstance(aliases, list):
+            for alias in aliases:
+                if isinstance(alias, str) and alias.strip():
+                    lookup_candidates.append(alias.strip())
+
+    # Deduplicate while preserving order.
+    lookup_candidates = list(dict.fromkeys(lookup_candidates))
+
+    available = any(
+        candidate in provider_id_set
+        or _normalize_model_identifier(candidate) in provider_norm_set
+        for candidate in lookup_candidates
+    )
+
+    catalog_overlap = _catalog_provider_overlap_count(provider_ids)
+    provider_catalog_visible = catalog_overlap > 0
+    provider_scope_unknown = bool(provider_ids) and not provider_catalog_visible
+
+    availability_state = "available" if available else "unavailable"
+    if provider_scope_unknown:
+        # Provider /models endpoint is likely not image-aware for this account/plan.
+        # Avoid false negatives that would block valid image requests.
+        availability_state = "unknown"
+        if card is not None:
+            available = True
+
+    alternatives: list[dict[str, Any]] = []
+    if include_alternatives and availability_state == "unavailable":
+        try:
+            alternatives = catalog_find_alternatives(
+                model_id=selected_model_id,
+                task_type=normalized_task_type,
+                max_results=3
+            )
+            alternatives = [alt for alt in alternatives if alt.get("id") in provider_id_set]
+        except Exception:
+            alternatives = []
+
+    payload: dict[str, Any] = {
+        "ok": True,
+        "model_id": selected_model_id,
+        "task_type": normalized_task_type,
+        "available": available,
+        "availability_state": availability_state,
+        "provider_check": {
+            "provider_base_url": get_jarvina_base_url(),
+            "fetched_at": fetched_at,
+            "used_cache": used_cache,
+            "provider_model_count": len(provider_ids),
+            "catalog_overlap_count": catalog_overlap,
+            "catalog_visibility": "visible" if provider_catalog_visible else "not_visible",
+        },
+        "catalog_check": {
+            "found_in_catalog": card is not None,
+            "task_type_matches": task_type_matches_card,
+        },
+        "checked_at": checked_at,
+    }
+
+    if card:
+        payload["catalog_model"] = {
+            "id": card.get("id"),
+            "name": card.get("name"),
+            "task_types": card.get("task_types", []),
+            "quality_tier": card.get("quality_tier"),
+            "speed_tier": card.get("speed_tier"),
+        }
+
+    if catalog_error:
+        payload["catalog_error"] = catalog_error
+
+    if availability_state == "unknown":
+        payload["recommendation"] = (
+            "O endpoint /models do provedor não expôs modelos do catálogo de imagem; "
+            "tratando disponibilidade como incerta para evitar falso negativo."
+        )
+    elif availability_state == "unavailable":
+        payload["recommendation"] = "Escolha um modelo alternativo ativo e tente novamente."
+        payload["alternatives"] = alternatives
+    else:
+        payload["recommendation"] = f"Modelo '{selected_model_id}' está ativo no provedor."
+
+    return payload
+
+
+def _enforce_model_precheck(
+    model_id: str,
+    task_type: str,
+    strict_model_check: bool,
+    force_model_refresh: bool
+) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]]]:
+    if not strict_model_check:
+        return None, None
+
+    check_payload = _build_model_availability_payload(
+        model_id=model_id,
+        task_type=task_type,
+        force_refresh=force_model_refresh,
+        include_alternatives=True,
+    )
+    if not check_payload.get("ok"):
+        return {
+            "error": "Could not verify model status before execution.",
+            "code": "model_precheck_failed",
+            "details": check_payload,
+        }, None
+
+    availability_state = str(check_payload.get("availability_state") or "").strip().lower()
+    if not availability_state:
+        availability_state = "available" if check_payload.get("available") else "unavailable"
+
+    if availability_state == "unavailable":
+        return {
+            "error": f"Model '{model_id}' is not currently available on provider.",
+            "code": "model_not_available",
+            "details": check_payload,
+        }, None
+
+    catalog_check = check_payload.get("catalog_check", {})
+    if not catalog_check.get("found_in_catalog"):
+        return {
+            "error": (
+                f"Model '{model_id}' is active in provider but missing in local model cards. "
+                "Use list_model_cards/get_model_card to pick a cataloged model."
+            ),
+            "code": "model_missing_in_catalog",
+            "details": check_payload,
+        }, None
+
+    if catalog_check.get("task_type_matches") is False:
+        return {
+            "error": (
+                f"Model '{model_id}' is not classified for task "
+                f"'{_normalize_task_type(task_type)}' in model cards."
+            ),
+            "code": "model_task_mismatch",
+            "details": check_payload,
+        }, None
+
+    return None, check_payload
+
+
+_QUALITY_RANK = {"entry": 1, "standard": 2, "pro": 3, "premium": 4}
+_SPEED_RANK = {"slow": 1, "balanced": 2, "fast": 3}
+
+
+def _extract_task_price(card: dict[str, Any], task_type: str) -> Optional[float]:
+    pricing = card.get("pricing", {})
+    per_image = pricing.get("per_image")
+    per_edit = pricing.get("per_edit")
+    value: Any
+    if task_type == "image_edit":
+        value = per_edit if per_edit is not None else per_image
+    else:
+        value = per_image if per_image is not None else per_edit
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _infer_intent_use_case_hints(intent: str) -> set[str]:
+    normalized = (intent or "").strip().lower()
+    if not normalized:
+        return set()
+
+    mapping = {
+        "anime_manga": {"anime", "manga", "otaku"},
+        "graphic_design": {"logo", "branding", "brand", "vector", "poster"},
+        "semantic_accuracy": {"accurate", "accuracy", "fiel", "preciso", "instruction"},
+        "rapid_prototyping": {"fast", "quick", "rápido", "rapido", "prototype", "iteração"},
+        "photorealistic_human_figures": {"portrait", "photo", "photoreal", "human", "person"},
+        "vivid_color_scenes": {"vibrant", "vivid", "colorful", "cores"},
+        "creative_concepts": {"concept", "concept art", "creative", "criativo"},
+        "general_generation": {"image", "scene", "render"},
+    }
+    hints: set[str] = set()
+    for use_case, keywords in mapping.items():
+        if any(keyword in normalized for keyword in keywords):
+            hints.add(use_case)
+    return hints
+
+
+def _infer_preferred_quality_tier(intent: str) -> Optional[str]:
+    normalized = (intent or "").strip().lower()
+    if not normalized:
+        return None
+    if any(token in normalized for token in {"premium", "ultra", "best quality", "maximum detail"}):
+        return "premium"
+    if any(token in normalized for token in {"high quality", "high-detail", "detailed", "pro"}):
+        return "pro"
+    return None
+
+
+def _infer_preferred_speed_tier(intent: str) -> Optional[str]:
+    normalized = (intent or "").strip().lower()
+    if not normalized:
+        return None
+    if any(token in normalized for token in {"fast", "quick", "rápido", "rapido", "urgent"}):
+        return "fast"
+    if any(token in normalized for token in {"balanced", "equilibrado"}):
+        return "balanced"
+    return None
+
+
+def _normalize_quality_tier(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    return normalized if normalized in _QUALITY_RANK else None
+
+
+def _normalize_speed_tier(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    return normalized if normalized in _SPEED_RANK else None
+
+
+def _compute_tier_alignment_score(
+    card_tier: Optional[str],
+    preferred_tier: Optional[str],
+    rank_map: dict[str, int],
+    *,
+    exact_bonus: float,
+    near_bonus: float,
+) -> float:
+    if not preferred_tier or not card_tier:
+        return 0.0
+    if card_tier not in rank_map or preferred_tier not in rank_map:
+        return 0.0
+    diff = abs(rank_map[card_tier] - rank_map[preferred_tier])
+    if diff == 0:
+        return exact_bonus
+    if diff == 1:
+        return near_bonus
+    return 0.0
+
+
+@mcp.tool()
+def recommend_model_for_intent(
+    task_type: str = "text_to_image",
+    intent: str = "",
+    max_results: int = 5,
+    budget_per_image: Optional[float] = None,
+    preferred_quality_tier: Optional[str] = None,
+    preferred_speed_tier: Optional[str] = None,
+    prioritize_cost: bool = False,
+    verify_online: bool = True,
+    force_model_refresh: bool = False,
+    include_unavailable: bool = False,
+    fields: Optional[str] = None,
+) -> str:
+    """
+    Recommend best-fit models for a human intent using model-card metadata.
+
+    This tool is the preferred decision step before generation:
+    1) `recommend_model_for_intent` to shortlist ranked candidates.
+    2) `verify_model_availability` for final model confirmation.
+    3) `generate_image` or `edit_image`.
+
+    Ranking signals:
+    - task compatibility (`task_type`);
+    - intent vs `recommended_use_cases` / `avoid_use_cases`;
+    - quality/speed tier preferences;
+    - optional budget cap and cost prioritization;
+    - optional online availability signal.
+    """
+    request_id = _new_request_id()
+    try:
+        normalized_task_type = _normalize_task_type(task_type)
+        selected_fields, fields_error = _parse_card_fields(fields)
+        if fields_error:
+            return _error_response(
+                error=fields_error,
+                code="invalid_fields",
+                details={"fields": fields},
+                legacy_text=f"Error: {fields_error}",
+                request_id=request_id,
+            )
+
+        if max_results < 1:
+            return _error_response(
+                error="max_results must be >= 1.",
+                code="invalid_max_results",
+                details={"max_results": max_results},
+                legacy_text="Error: max_results must be >= 1.",
+                request_id=request_id,
+            )
+
+        if budget_per_image is not None and budget_per_image <= 0:
+            return _error_response(
+                error="budget_per_image must be > 0 when provided.",
+                code="invalid_budget",
+                details={"budget_per_image": budget_per_image},
+                legacy_text="Error: budget_per_image must be > 0.",
+                request_id=request_id,
+            )
+
+        effective_quality_pref = _normalize_quality_tier(preferred_quality_tier) or _infer_preferred_quality_tier(intent)
+        if preferred_quality_tier and not effective_quality_pref:
+            return _error_response(
+                error="preferred_quality_tier must be one of: entry, standard, pro, premium.",
+                code="invalid_quality_tier",
+                details={"preferred_quality_tier": preferred_quality_tier},
+                legacy_text="Error: invalid preferred_quality_tier.",
+                request_id=request_id,
+            )
+
+        effective_speed_pref = _normalize_speed_tier(preferred_speed_tier) or _infer_preferred_speed_tier(intent)
+        if preferred_speed_tier and not effective_speed_pref:
+            return _error_response(
+                error="preferred_speed_tier must be one of: slow, balanced, fast.",
+                code="invalid_speed_tier",
+                details={"preferred_speed_tier": preferred_speed_tier},
+                legacy_text="Error: invalid preferred_speed_tier.",
+                request_id=request_id,
+            )
+
+        cards = catalog_list_model_cards(task_type=normalized_task_type, include_inactive=False)
+        intent_hints = _infer_intent_use_case_hints(intent)
+
+        provider_ids: list[str] = []
+        provider_id_set: set[str] = set()
+        provider_norm_set: set[str] = set()
+        provider_visibility = "not_checked"
+        provider_fetched_at: Optional[str] = None
+        provider_used_cache = False
+
+        if verify_online:
+            try:
+                provider_ids, provider_fetched_at, provider_used_cache = _get_provider_model_ids(
+                    force_refresh=force_model_refresh
+                )
+                provider_id_set = set(provider_ids)
+                provider_norm_set = {_normalize_model_identifier(model_id) for model_id in provider_ids}
+                overlap = _catalog_provider_overlap_count(provider_ids)
+                provider_visibility = "visible" if overlap > 0 else "not_visible"
+            except Exception:
+                provider_visibility = "query_failed"
+
+        ranked: list[dict[str, Any]] = []
+        for card in cards:
+            model_id = str(card.get("id") or "").strip()
+            if not model_id:
+                continue
+
+            price = _extract_task_price(card, normalized_task_type)
+            if budget_per_image is not None and price is not None and price > budget_per_image:
+                continue
+
+            availability_state = "not_checked"
+            is_available = None
+            if verify_online and provider_visibility in {"visible", "not_visible"}:
+                aliases = card.get("aliases", [])
+                candidates = [model_id]
+                if isinstance(aliases, list):
+                    candidates.extend(
+                        alias.strip() for alias in aliases if isinstance(alias, str) and alias.strip()
+                    )
+                candidates = list(dict.fromkeys(candidates))
+                available_by_models = any(
+                    candidate in provider_id_set
+                    or _normalize_model_identifier(candidate) in provider_norm_set
+                    for candidate in candidates
+                )
+                if provider_visibility == "not_visible":
+                    availability_state = "unknown"
+                    is_available = True
+                else:
+                    availability_state = "available" if available_by_models else "unavailable"
+                    is_available = available_by_models
+
+            if availability_state == "unavailable" and not include_unavailable:
+                continue
+
+            score = 0.0
+            reasons: list[str] = []
+
+            recommended_use_cases = {
+                str(item).strip().lower()
+                for item in card.get("recommended_use_cases", [])
+                if isinstance(item, str) and item.strip()
+            }
+            avoid_use_cases = {
+                str(item).strip().lower()
+                for item in card.get("avoid_use_cases", [])
+                if isinstance(item, str) and item.strip()
+            }
+
+            matched_use_cases = sorted(intent_hints.intersection(recommended_use_cases))
+            avoided_hits = sorted(intent_hints.intersection(avoid_use_cases))
+
+            if matched_use_cases:
+                use_case_score = min(42.0, 14.0 * len(matched_use_cases))
+                score += use_case_score
+                reasons.append(f"use_case_match={matched_use_cases}")
+            elif intent_hints:
+                score += 2.0
+            else:
+                score += 8.0
+                reasons.append("generic_intent")
+
+            if avoided_hits:
+                penalty = 18.0 * len(avoided_hits)
+                score -= penalty
+                reasons.append(f"avoid_use_case_penalty={avoided_hits}")
+
+            quality_tier = str(card.get("quality_tier") or "").strip().lower()
+            quality_score = _compute_tier_alignment_score(
+                quality_tier,
+                effective_quality_pref,
+                _QUALITY_RANK,
+                exact_bonus=12.0,
+                near_bonus=6.0,
+            )
+            if quality_score:
+                score += quality_score
+                reasons.append(f"quality_alignment={quality_tier}")
+
+            speed_tier = str(card.get("speed_tier") or "").strip().lower()
+            speed_score = _compute_tier_alignment_score(
+                speed_tier,
+                effective_speed_pref,
+                _SPEED_RANK,
+                exact_bonus=10.0,
+                near_bonus=5.0,
+            )
+            if speed_score:
+                score += speed_score
+                reasons.append(f"speed_alignment={speed_tier}")
+
+            if prioritize_cost and price is not None:
+                # Strongly favor lower cost while keeping quality/use-case signal.
+                cost_bonus = max(0.0, 16.0 - (price * 320.0))
+                score += cost_bonus
+                reasons.append("cost_priority")
+
+            if availability_state == "available":
+                score += 10.0
+                reasons.append("provider_available")
+            elif availability_state == "unknown":
+                score += 3.0
+                reasons.append("provider_availability_unknown")
+            elif availability_state == "unavailable":
+                score -= 20.0
+                reasons.append("provider_unavailable")
+
+            ranked.append(
+                {
+                    "model_id": model_id,
+                    "score": round(score, 4),
+                    "price": price,
+                    "availability_state": availability_state,
+                    "available": is_available,
+                    "matched_use_cases": matched_use_cases,
+                    "reasons": reasons,
+                    "card": card,
+                }
+            )
+
+        ranked.sort(
+            key=lambda item: (
+                -item["score"],
+                item["price"] if item["price"] is not None else float("inf"),
+                item["model_id"],
+            )
+        )
+        limited = ranked[:max_results]
+        candidates = []
+        for item in limited:
+            projected_card = _project_card_fields(item["card"], selected_fields)
+            candidates.append(
+                {
+                    "model_id": item["model_id"],
+                    "score": item["score"],
+                    "price": item["price"],
+                    "availability_state": item["availability_state"],
+                    "available": item["available"],
+                    "matched_use_cases": item["matched_use_cases"],
+                    "reasons": item["reasons"],
+                    "model": projected_card,
+                }
+            )
+
+        return _success_response(
+            data={
+                "task_type": normalized_task_type,
+                "intent": intent,
+                "intent_hints": sorted(intent_hints),
+                "preferences": {
+                    "quality_tier": effective_quality_pref,
+                    "speed_tier": effective_speed_pref,
+                    "budget_per_image": budget_per_image,
+                    "prioritize_cost": prioritize_cost,
+                },
+                "online_check": {
+                    "enabled": verify_online,
+                    "provider_model_count": len(provider_ids),
+                    "provider_catalog_visibility": provider_visibility,
+                    "fetched_at": provider_fetched_at,
+                    "used_cache": provider_used_cache,
+                },
+                "fields": selected_fields,
+                "count": len(candidates),
+                "candidates": candidates,
+                "recommended_workflow": [
+                    "recommend_model_for_intent",
+                    "verify_model_availability",
+                    "generate_image/edit_image",
+                ],
+            },
+            legacy_text=(
+                "Model recommendation completed. "
+                "Use verify_model_availability on the top candidate before execution."
+            ),
+            request_id=request_id,
+        )
+    except ModelCatalogError as exc:
+        return _error_response(
+            error=str(exc),
+            code="catalog_error",
+            details={"task_type": task_type},
+            legacy_text=f"Error: {str(exc)}",
+            request_id=request_id,
+        )
+    except Exception as exc:
+        return _error_response(
+            error=f"Erro inesperado ao recomendar modelos: {exc}",
+            code="unexpected_error",
+            details={"task_type": task_type, "intent": intent},
+            legacy_text=f"Error: {exc}",
+            request_id=request_id,
+        )
+
+
+@mcp.tool()
+def list_model_cards(
+    task_type: str = "text_to_image",
+    include_inactive: bool = False,
+    limit: int = 12,
+    offset: int = 0,
+    fields: Optional[str] = None
+) -> str:
+    """
+    List local model cards without calling the provider.
+
+    Agent guidance:
+    - Use this as a low-latency discovery step.
+    - For intent-aware ranking, prefer `recommend_model_for_intent`.
+    - Always confirm final choice with `verify_model_availability` before execution.
+
+    Parameters:
+    - `task_type`: task family (`text_to_image`, `image_edit`, `upscaling`, `background_removal`).
+    - `include_inactive`: include catalog entries with status != active.
+    - `limit`/`offset`: pagination controls.
+    - `fields`: comma-separated projection (e.g., `id,name,recommended_api_params`).
+    """
+    request_id = _new_request_id()
+    try:
+        normalized_task_type = _normalize_task_type(task_type)
+        selected_fields, fields_error = _parse_card_fields(fields)
+        if fields_error:
+            return _error_response(
+                error=fields_error,
+                code="invalid_fields",
+                details={"fields": fields},
+                legacy_text=f"Error: {fields_error}",
+                request_id=request_id,
+            )
+
+        safe_limit, safe_offset = _normalize_limit_offset(limit, offset)
+        cards = catalog_list_model_cards(task_type=normalized_task_type, include_inactive=include_inactive)
+        total_count = len(cards)
+        page = cards[safe_offset:safe_offset + safe_limit]
+        projected_models = [_project_card_fields(card, selected_fields) for card in page]
+        metadata = get_catalog_metadata()
+
+        legacy_lines = [
+            "Model cards:",
+            *[
+                f"- {card.get('id', 'unknown')} ({card.get('name', 'unknown')})"
+                for card in projected_models
+            ],
+        ]
+        legacy_text = "\n".join(legacy_lines)
+
+        return _success_response(
+            data={
+                "task_type": normalized_task_type,
+                "include_inactive": include_inactive,
+                "catalog_metadata": metadata,
+                "total_count": total_count,
+                "count": len(projected_models),
+                "limit": safe_limit,
+                "offset": safe_offset,
+                "has_more": safe_offset + len(projected_models) < total_count,
+                "fields": selected_fields,
+                "models": projected_models,
+            },
+            legacy_text=legacy_text,
+            request_id=request_id,
+        )
+    except ModelCatalogError as exc:
+        return _error_response(
+            error=str(exc),
+            code="catalog_error",
+            details={"task_type": task_type},
+            legacy_text=f"Error: {str(exc)}",
+            request_id=request_id,
+        )
+    except Exception as exc:
+        return _error_response(
+            error=f"Erro inesperado ao listar model cards: {exc}",
+            code="unexpected_error",
+            details={"task_type": task_type},
+            legacy_text=f"Error: {str(exc)}",
+            request_id=request_id,
+        )
+
+
+@mcp.tool()
+def get_model_card(model_id: str, fields: Optional[str] = None) -> str:
+    """
+    Return a single model card from the local catalog.
+
+    Agent guidance:
+    - Use after shortlist/recommendation when detailed inspection is needed.
+    - Read `recommended_api_params` to bootstrap `generate_image` arguments.
+
+    Parameters:
+    - `model_id`: exact model id or alias from catalog.
+    - `fields`: optional projection; omit for full card.
+    """
+    request_id = _new_request_id()
+    try:
+        card = catalog_get_model_card(model_id)
+        metadata = get_catalog_metadata()
+        if not card:
+            error_message = f"Model '{model_id}' não encontrado no catálogo."
+            return _error_response(
+                error=error_message,
+                code="model_not_found",
+                details={"model_id": model_id, "catalog_metadata": metadata},
+                legacy_text=f"Error: {error_message}",
+                request_id=request_id,
+            )
+
+        if fields is None:
+            selected_fields = sorted(card.keys())
+            projected_card = card
+        else:
+            selected_fields, fields_error = _parse_card_fields(fields)
+            if fields_error:
+                return _error_response(
+                    error=fields_error,
+                    code="invalid_fields",
+                    details={"fields": fields, "model_id": model_id},
+                    legacy_text=f"Error: {fields_error}",
+                    request_id=request_id,
+                )
+            projected_card = _project_card_fields(card, selected_fields)
+        legacy_text = f"Model card: {card.get('id')} ({card.get('name')})"
+        return _success_response(
+            data={"catalog_metadata": metadata, "fields": selected_fields, "model": projected_card},
+            legacy_text=legacy_text,
+            request_id=request_id,
+        )
+    except ModelCatalogError as exc:
+        return _error_response(
+            error=str(exc),
+            code="catalog_error",
+            details={"model_id": model_id},
+            legacy_text=f"Error: {str(exc)}",
+            request_id=request_id,
+        )
+    except Exception as exc:
+        return _error_response(
+            error=f"Erro inesperado ao buscar model card: {exc}",
+            code="unexpected_error",
+            details={"model_id": model_id},
+            legacy_text=f"Error: {str(exc)}",
+            request_id=request_id,
+        )
+
+
+@mcp.tool()
+def list_image_styles(
+    force_refresh: bool = False,
+    limit: int = 50,
+    offset: int = 0,
+) -> str:
+    """
+    List image style presets available in provider (`GET /image/styles`).
+
+    Recommended usage:
+    1) Discover styles with `list_image_styles`.
+    2) Use selected value in `generate_image(style_preset=...)`.
+    3) Keep `strict_style_check=True` to block invalid style names.
+    """
+    request_id = _new_request_id()
+    try:
+        safe_limit, safe_offset = _normalize_limit_offset(limit, offset, max_limit=200)
+        styles, fetched_at, used_cache = _get_provider_image_styles(force_refresh=force_refresh)
+        total_count = len(styles)
+        page = styles[safe_offset:safe_offset + safe_limit]
+        legacy_text = "Image styles:\n" + "\n".join(
+            f"- {entry.get('name') or entry.get('id')}" for entry in page
+        ) if page else "Nenhum style_preset encontrado no provedor."
+        return _success_response(
+            data={
+                "styles": page,
+                "count": len(page),
+                "total_count": total_count,
+                "limit": safe_limit,
+                "offset": safe_offset,
+                "has_more": safe_offset + len(page) < total_count,
+                "metadata": {
+                    "provider_base_url": get_jarvina_base_url(),
+                    "fetched_at": fetched_at,
+                    "used_cache": used_cache,
+                    "ttl_seconds": STYLE_LIST_CACHE_TTL_SECONDS,
+                },
+            },
+            legacy_text=legacy_text,
+            request_id=request_id,
+        )
+    except Exception as exc:
+        return _error_response(
+            error=f"Erro ao buscar estilos de imagem: {exc}",
+            code="provider_styles_query_failed",
+            legacy_text=f"Erro ao buscar estilos de imagem: {exc}",
+            request_id=request_id,
+        )
+
+
+@mcp.tool()
+def list_available_models(force_refresh: bool = False) -> str:
+    """
+    List currently available model IDs from the configured provider (online).
+
+    This is provider-state introspection and may differ from local model cards.
+    Prefer catalog-first selection (`list_model_cards`) and use this tool when
+    raw provider inventory is needed.
+
+    Parameters:
+    - `force_refresh=False`: uses short provider cache (TTL=300s).
+    - `force_refresh=True`: bypasses cache and performs fresh provider query.
+    """
+    request_id = _new_request_id()
+    try:
+        model_ids, fetched_at, used_cache = _get_provider_model_ids(force_refresh=force_refresh)
+        legacy_text = "Modelos disponíveis para uso:\n- " + "\n- ".join(model_ids) if model_ids else "Nenhum modelo encontrado no provedor atual."
+        return _success_response(
+            data={
+                "models": model_ids,
+                "count": len(model_ids),
+                "metadata": {
+                    "provider_base_url": get_jarvina_base_url(),
+                    "fetched_at": fetched_at,
+                    "used_cache": used_cache,
+                    "ttl_seconds": MODEL_LIST_CACHE_TTL_SECONDS,
+                },
+            },
+            legacy_text=legacy_text,
+            request_id=request_id,
+        )
     except Exception as e:
-        return f"Erro ao buscar modelos: {str(e)}"
+        return _error_response(
+            error=f"Erro ao buscar modelos: {str(e)}",
+            code="provider_query_failed",
+            legacy_text=f"Erro ao buscar modelos: {str(e)}",
+            request_id=request_id,
+        )
+
+
+@mcp.tool()
+def verify_model_availability(
+    model_id: str,
+    task_type: str = "text_to_image",
+    force_refresh: bool = False,
+    include_alternatives: bool = True
+) -> str:
+    """
+    Verify model viability before execution (provider + catalog checks).
+
+    Checks performed:
+    - provider visibility from `/models` (with cache);
+    - model presence in local cards;
+    - task compatibility (`task_type` in `card.task_types`);
+    - alternatives when unavailable.
+
+    Notes for agents:
+    - `availability_state='unknown'` means provider `/models` is not image-aware for this account.
+      In that case, card-valid models can still be executed.
+    """
+    request_id = _new_request_id()
+    if not model_id or not model_id.strip():
+        return _error_response(
+            error="model_id é obrigatório.",
+            code="missing_model_id",
+            legacy_text="Error: model_id is required.",
+            request_id=request_id,
+        )
+    model_error = _validate_model_id(model_id)
+    if model_error:
+        return _error_response(
+            error=model_error,
+            code="invalid_model_id",
+            legacy_text=f"Error: {model_error}",
+            request_id=request_id,
+        )
+    payload = _build_model_availability_payload(
+        model_id=model_id,
+        task_type=task_type,
+        force_refresh=force_refresh,
+        include_alternatives=include_alternatives,
+    )
+    if not payload.get("ok"):
+        return _error_response(
+            error=payload.get("error", "Falha ao verificar modelo."),
+            code="availability_check_failed",
+            details=payload,
+            legacy_text=f"Error: {payload.get('error', 'Falha ao verificar modelo.')}",
+            request_id=request_id,
+        )
+
+    legacy_text = (
+        f"Modelo '{payload.get('model_id')}' está ativo no provedor."
+        if payload.get("available")
+        else f"Modelo '{payload.get('model_id')}' indisponível no provedor."
+    )
+    return _success_response(data=payload, legacy_text=legacy_text, request_id=request_id)
+
+
+@mcp.tool()
+def get_nanobot_profile() -> str:
+    """
+    Return machine-readable server profile for nanobot orchestration.
+
+    Includes:
+    - contract version;
+    - recommended workflows;
+    - tool enablement guidance.
+
+    Use this as the canonical integration contract when bootstrapping an agent.
+    """
+    request_id = _new_request_id()
+    profile = build_nanobot_profile()
+    return _success_response(
+        data=profile,
+        legacy_text=(
+            "Nanobot profile loaded. Recommended flow: "
+            "list_model_cards -> verify_model_availability -> generate_image/edit_image."
+        ),
+        request_id=request_id,
+        tool_name="get_nanobot_profile",
+    )
+
+
+@mcp.tool()
+def get_security_metrics() -> str:
+    """
+    Return in-memory security counters/events for audit and incident triage.
+
+    Typical use:
+    - check blocked-path, prompt-injection, auth, egress and cache events;
+    - correlate recent failures with security controls.
+
+    Notes:
+    - data is in-memory and process-local;
+    - values reset on server restart or `clear_security_metrics`.
+    """
+    request_id = _new_request_id()
+    return _success_response(
+        data={
+            "operation": "get_security_metrics",
+            "security_metrics": get_security_metrics_snapshot(),
+        },
+        legacy_text="Security metrics snapshot generated.",
+        request_id=request_id,
+        tool_name="get_security_metrics",
+    )
+
+
+@mcp.tool()
+def clear_security_metrics() -> str:
+    """
+    Clear in-memory security counters/events and return reset summary.
+
+    Use when starting a new diagnostic window or incident timeline.
+    """
+    request_id = _new_request_id()
+    cleared = clear_security_metrics_snapshot()
+    return _success_response(
+        data={
+            "operation": "clear_security_metrics",
+            **cleared,
+        },
+        legacy_text=(
+            "Security metrics cleared. "
+            f"events={cleared['cleared_recent_events_total']} counters={cleared['cleared_counters_total']}"
+        ),
+        request_id=request_id,
+        tool_name="clear_security_metrics",
+    )
+
+
+@mcp.tool()
+def get_security_posture() -> str:
+    """
+    Return effective runtime security posture for auditability.
+
+    Includes:
+    - working-dir sandbox policy;
+    - HTTP/auth policy;
+    - egress/download policy;
+    - input limit policy;
+    - warning list for permissive configurations.
+    """
+    request_id = _new_request_id()
+
+    allowed_roots = [str(root) for root in get_allowed_working_roots()]
+    root_sandbox_disabled = _env_bool("PERCIVAL_IMAGE_MCP_DISABLE_ROOT_SANDBOX", False)
+    allow_remote_http = _env_bool("PERCIVAL_IMAGE_MCP_ALLOW_REMOTE_HTTP", False)
+    allow_private_provider = _env_bool("PERCIVAL_IMAGE_MCP_ALLOW_PRIVATE_PROVIDER_URL", False)
+    allow_insecure_provider = _env_bool("PERCIVAL_IMAGE_MCP_ALLOW_INSECURE_PROVIDER_URL", False)
+    allow_private_downloads = _env_bool("PERCIVAL_IMAGE_MCP_ALLOW_PRIVATE_DOWNLOADS", False)
+    allow_http_downloads = _env_bool("PERCIVAL_IMAGE_MCP_ALLOW_HTTP_DOWNLOADS", False)
+    default_output_dir = _get_default_output_directory()
+
+    warnings: list[str] = []
+    if root_sandbox_disabled:
+        warnings.append("Root sandbox disabled: working_dir containment is bypassed.")
+    if allow_remote_http:
+        warnings.append("Remote HTTP bind allowed: ensure token + trusted network boundary.")
+    if allow_private_provider:
+        warnings.append("Private provider URLs allowed.")
+    if allow_insecure_provider:
+        warnings.append("Insecure provider URLs (http) allowed.")
+    if allow_private_downloads:
+        warnings.append("Private download URLs allowed.")
+    if allow_http_downloads:
+        warnings.append("HTTP download URLs allowed.")
+    if not default_output_dir.exists():
+        warnings.append(f"Default output directory does not exist: {default_output_dir}")
+
+    posture = {
+        "server": SERVER_NAME,
+        "contract_version": CONTRACT_VERSION,
+        "working_dir_policy": {
+            "root_sandbox_disabled": root_sandbox_disabled,
+            "allowed_roots": allowed_roots,
+            "configured_allowed_roots_env": os.getenv("PERCIVAL_IMAGE_MCP_ALLOWED_ROOTS", ""),
+            "default_output_dir": str(default_output_dir),
+        },
+        "http_policy": {
+            "allow_remote_http": allow_remote_http,
+            "auth_token_env": os.getenv("PERCIVAL_IMAGE_MCP_AUTH_TOKEN_ENV", "PERCIVAL_IMAGE_MCP_AUTH_TOKEN"),
+        },
+        "egress_policy": {
+            "provider_base_url": get_jarvina_base_url(),
+            "allow_private_provider_url": allow_private_provider,
+            "allow_insecure_provider_url": allow_insecure_provider,
+            "allowed_provider_hosts": os.getenv("PERCIVAL_IMAGE_MCP_ALLOWED_PROVIDER_HOSTS", ""),
+            "allow_private_downloads": allow_private_downloads,
+            "allow_http_downloads": allow_http_downloads,
+            "allowed_download_hosts": os.getenv("PERCIVAL_IMAGE_MCP_ALLOWED_DOWNLOAD_HOSTS", ""),
+            "download_max_bytes": _env_int("PERCIVAL_IMAGE_MCP_DOWNLOAD_MAX_BYTES", 25 * 1024 * 1024),
+        },
+        "input_limits": {
+            "max_prompt_chars": _env_int("PERCIVAL_IMAGE_MCP_MAX_PROMPT_CHARS", DEFAULT_MAX_PROMPT_CHARS),
+            "max_negative_prompt_chars": _env_int(
+                "PERCIVAL_IMAGE_MCP_MAX_NEGATIVE_PROMPT_CHARS",
+                DEFAULT_MAX_NEGATIVE_PROMPT_CHARS,
+            ),
+            "max_filename_prefix_chars": _env_int(
+                "PERCIVAL_IMAGE_MCP_MAX_FILENAME_PREFIX_CHARS",
+                DEFAULT_MAX_FILENAME_PREFIX_CHARS,
+            ),
+            "max_model_id_chars": _env_int("PERCIVAL_IMAGE_MCP_MAX_MODEL_ID_CHARS", DEFAULT_MAX_MODEL_ID_CHARS),
+            "max_list_files": _env_int("PERCIVAL_IMAGE_MCP_MAX_LIST_FILES", DEFAULT_MAX_LIST_FILES),
+            "max_analysis_prompt_chars": _env_int(
+                "PERCIVAL_IMAGE_MCP_MAX_ANALYSIS_PROMPT_CHARS",
+                4000,
+            ),
+            "max_comparison_focus_chars": _env_int(
+                "PERCIVAL_IMAGE_MCP_MAX_COMPARISON_FOCUS_CHARS",
+                200,
+            ),
+        },
+        "warnings": warnings,
+    }
+    record_security_event(
+        "security_posture_checked",
+        {"warning_count": len(warnings)},
+    )
+    return _success_response(
+        data={"operation": "get_security_posture", "posture": posture},
+        legacy_text=f"Security posture generated with {len(warnings)} warning(s).",
+        request_id=request_id,
+        tool_name="get_security_posture",
+    )
+
 
 @mcp.tool()
 def generate_image(
     working_dir: str,
     prompt: str,
-    model: str = "fluently-xl",
+    model: str = "venice-sd35",
     size: str = "1024x1024",
     aspect_ratio: Optional[str] = None,
     resolution: Optional[str] = None,
     cfg_scale: Optional[float] = None,
     negative_prompt: Optional[str] = None,
-    output_dir: str = "generated_images",
-    filename_prefix: str = "jarvina_gen"
+    steps: Optional[int] = None,
+    style_preset: Optional[str] = None,
+    safe_mode: Optional[bool] = None,
+    variants: Optional[int] = None,
+    seed: Optional[int] = None,
+    format: Optional[str] = None,
+    lora_strength: Optional[int] = None,
+    width: Optional[int] = None,
+    height: Optional[int] = None,
+    hide_watermark: Optional[bool] = None,
+    embed_exif_metadata: Optional[bool] = None,
+    enable_web_search: Optional[bool] = None,
+    parameter_overrides_json: Optional[str] = None,
+    output_dir: Optional[str] = None,
+    filename_prefix: str = "jarvina_gen",
+    strict_model_check: bool = True,
+    force_model_refresh: bool = False,
+    strict_style_check: bool = True,
+    force_style_refresh: bool = False,
 ) -> str:
     """
-    Gera uma imagem a partir de um prompt de texto usando o provedor configurado.
-    
-    Args:
-        working_dir: Absolute path to the working directory for file operations
-        prompt: A descrição detalhada da imagem desejada.
-        model: O ID do modelo a ser usado (use list_available_models para descobrir).
-        size: Dimensões básicas (ex: "1024x1024").
-        aspect_ratio: Opcional. Proporção da imagem (ex: "1:1", "16:9").
-        resolution: Opcional. Resolução desejada (ex: "1K", "2K", "4K").
-        cfg_scale: Opcional. Quão estritamente o modelo deve seguir o prompt (ex: 7.5).
-        negative_prompt: Opcional. O que NÃO deve aparecer na imagem.
-        output_dir: Directory relative to working_dir to save generated images
-        filename_prefix: Prefix for generated image filenames
-    """
-    try:
-        working_path = Path(working_dir)
-        if not working_path.is_absolute():
-            return f"Error: working_dir must be an absolute path, got: {working_dir}"
-        if not working_path.exists():
-            return f"Error: working_dir does not exist: {working_dir}"
-        if not working_path.is_dir():
-            return f"Error: working_dir is not a directory: {working_dir}"
-            
-        output_path = working_path / output_dir
-        output_path.mkdir(parents=True, exist_ok=True)
-        
-        extra_params = {}
-        if aspect_ratio:
-            extra_params["aspect_ratio"] = aspect_ratio
-        if resolution:
-            extra_params["resolution"] = resolution
-        if cfg_scale is not None:
-            extra_params["cfg_scale"] = cfg_scale
-        if negative_prompt:
-            extra_params["negative_prompt"] = negative_prompt
+    Generate image(s) from a text prompt with catalog-aware parameter planning.
 
-        response = client.images.generate(
-            prompt=prompt,
-            model=model,
-            size=size,
-            extra_body=extra_params if extra_params else None,
-            response_format="b64_json"
+    Recommended sequence:
+    1) `recommend_model_for_intent` or `list_model_cards`.
+    2) `verify_model_availability`.
+    3) `generate_image`.
+
+    Transport strategy (`PR-D`):
+    - `PERCIVAL_IMAGE_MCP_IMAGE_TRANSPORT=openai_compat|venice_native`.
+    - Native failures can fallback to OpenAI-compatible transport when
+      `PERCIVAL_IMAGE_MCP_IMAGE_TRANSPORT_FALLBACK=true`.
+
+    Parameter precedence (`PR-C`):
+    - explicit args > `parameter_overrides_json` > `recommended_api_params` > defaults.
+
+    Style validation (`PR-G`):
+    - when `strict_style_check=True`, `style_preset` is validated against
+      provider `/image/styles` and unknown values are blocked with suggestions.
+
+    Output directory default:
+    - when `output_dir` is omitted, files are saved to `/home/bill-kopp/Pictures`
+      (or `PERCIVAL_IMAGE_MCP_DEFAULT_OUTPUT_DIR` when configured).
+    """
+    request_id = _new_request_id()
+    try:
+        working_path, working_error = _validate_working_dir(working_dir)
+        if working_error:
+            return _error_response(
+                error=working_error,
+                code="invalid_working_dir",
+                details={"working_dir": working_dir},
+                legacy_text=working_error,
+                request_id=request_id,
+            )
+
+        prompt_max_chars = _env_int("PERCIVAL_IMAGE_MCP_MAX_PROMPT_CHARS", DEFAULT_MAX_PROMPT_CHARS)
+        sanitized_prompt, prompt_error = _sanitize_text_with_limit(
+            prompt,
+            field_name="prompt",
+            max_chars=prompt_max_chars,
         )
-        
-        saved_files = []
-        import time
-        timestamp = int(time.time())
-        
-        for i, image_data in enumerate(response.data):
-            filename = f"{filename_prefix}_{timestamp}_{i+1}.png"
-            file_path = output_path / filename
-            
-            if hasattr(image_data, 'b64_json') and image_data.b64_json:
-                if save_base64_image(image_data.b64_json, file_path):
-                    saved_files.append(str(file_path))
-                else:
-                    return f"Error: Failed to save image {i+1}"
-            elif hasattr(image_data, 'url') and image_data.url:
-                if download_image_from_url(image_data.url, file_path):
-                    saved_files.append(str(file_path))
-                else:
-                    return f"Error: Failed to download image {i+1} from URL"
-            else:
-                return f"Error: No image data found in response for image {i+1}"
-        
-        result = f"Imagem gerada com sucesso! (Modelo: {model})\n\n"
-        result += f"Prompt: {prompt}\n"
+        if prompt_error:
+            return _error_response(
+                error=prompt_error,
+                code="invalid_prompt",
+                details={"prompt": prompt},
+                legacy_text=f"Error: {prompt_error}",
+                request_id=request_id,
+            )
+
+        model_error = _validate_model_id(model)
+        if model_error:
+            return _error_response(
+                error=model_error,
+                code="invalid_model_id",
+                details={"model": model},
+                legacy_text=f"Error: {model_error}",
+                request_id=request_id,
+            )
+
+        prefix_error = _validate_filename_prefix(filename_prefix)
+        if prefix_error:
+            return _error_response(
+                error=prefix_error,
+                code="invalid_filename_prefix",
+                details={"filename_prefix": filename_prefix},
+                legacy_text=f"Error: {prefix_error}",
+                request_id=request_id,
+            )
+
+        if negative_prompt is not None:
+            negative_max_chars = _env_int(
+                "PERCIVAL_IMAGE_MCP_MAX_NEGATIVE_PROMPT_CHARS",
+                DEFAULT_MAX_NEGATIVE_PROMPT_CHARS,
+            )
+            sanitized_negative_prompt, negative_error = _sanitize_text_with_limit(
+                negative_prompt,
+                field_name="negative_prompt",
+                max_chars=negative_max_chars,
+                allow_empty=True,
+            )
+            if negative_error:
+                return _error_response(
+                    error=negative_error,
+                    code="invalid_negative_prompt",
+                    details={"negative_prompt": negative_prompt},
+                    legacy_text=f"Error: {negative_error}",
+                    request_id=request_id,
+                )
+            negative_prompt = sanitized_negative_prompt
+
+        effective_output_dir = output_dir or str(_get_default_output_directory())
+        resolved_output_path, output_error = _resolve_output_path(
+            path_value=effective_output_dir,
+            working_path=working_path,
+            label="output_dir",
+        )
+        if output_error:
+            return _error_response(
+                error=output_error,
+                code="invalid_output_dir",
+                details={"output_dir": effective_output_dir, "working_dir": str(working_path)},
+                legacy_text=output_error,
+                request_id=request_id,
+            )
+
+        precheck_error, precheck_payload = _enforce_model_precheck(
+            model_id=model,
+            task_type="text_to_image",
+            strict_model_check=strict_model_check,
+            force_model_refresh=force_model_refresh,
+        )
+        if precheck_error:
+            return _error_response(
+                error=precheck_error["error"],
+                code=precheck_error["code"],
+                details=precheck_error.get("details"),
+                legacy_text=f"Error: {precheck_error['error']}",
+                request_id=request_id,
+            )
+
+        output_path = resolved_output_path
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        model_card = catalog_get_model_card(model)
+        recommended_params = {}
+        if model_card and isinstance(model_card.get("recommended_api_params"), dict):
+            recommended_params = dict(model_card["recommended_api_params"])
+
+        try:
+            runtime_overrides = parse_parameter_overrides_json(parameter_overrides_json)
+        except ValueError as exc:
+            return _error_response(
+                error=str(exc),
+                code="invalid_parameter_overrides",
+                details={"parameter_overrides_json": parameter_overrides_json},
+                legacy_text=f"Error: {exc}",
+                request_id=request_id,
+            )
+
+        explicit_params = {
+            "aspect_ratio": aspect_ratio,
+            "resolution": resolution,
+            "cfg_scale": cfg_scale,
+            "negative_prompt": negative_prompt,
+            "steps": steps,
+            "style_preset": style_preset,
+            "safe_mode": safe_mode,
+            "variants": variants,
+            "seed": seed,
+            "format": format,
+            "lora_strength": lora_strength,
+            "width": width,
+            "height": height,
+            "hide_watermark": hide_watermark,
+            "embed_exif_metadata": embed_exif_metadata,
+            "enable_web_search": enable_web_search,
+        }
+
+        try:
+            payload_plan = build_venice_generation_request(
+                model=model,
+                prompt=sanitized_prompt,
+                size=size,
+                explicit_params=explicit_params,
+                card_recommended_params=recommended_params,
+                runtime_overrides=runtime_overrides,
+            )
+        except ValueError as exc:
+            return _error_response(
+                error=str(exc),
+                code="invalid_generation_parameters",
+                details={
+                    "model": model,
+                    "recommended_params": recommended_params,
+                },
+                legacy_text=f"Error: {exc}",
+                request_id=request_id,
+            )
+
+        style_check_payload = None
+        resolved_style_preset = payload_plan.get("resolved_provider_params", {}).get("style_preset")
+        if isinstance(resolved_style_preset, str) and resolved_style_preset.strip():
+            style_check_payload = _build_style_validation_payload(
+                resolved_style_preset,
+                force_refresh=force_style_refresh,
+            )
+            if not style_check_payload.get("ok"):
+                if strict_style_check:
+                    return _error_response(
+                        error=style_check_payload.get(
+                            "error",
+                            "Could not verify style_preset before execution.",
+                        ),
+                        code="style_precheck_failed",
+                        details=style_check_payload,
+                        legacy_text=f"Error: {style_check_payload.get('error', 'style precheck failed')}",
+                        request_id=request_id,
+                    )
+            elif style_check_payload.get("availability_state") == "unavailable" and strict_style_check:
+                return _error_response(
+                    error=(
+                        f"style_preset '{resolved_style_preset}' is not available on provider. "
+                        "Use list_image_styles to select a valid style."
+                    ),
+                    code="invalid_style_preset",
+                    details=style_check_payload,
+                    legacy_text=(
+                        f"Error: style_preset '{resolved_style_preset}' is not available on provider."
+                    ),
+                    request_id=request_id,
+                )
+
+        response, transport_meta = generate_images_with_transport(
+            payload_plan["openai_request"],
+            openai_client=client,
+        )
+
+        saved_files, save_error = _save_images_from_response(
+            response=response,
+            output_path=output_path,
+            filename_prefix=filename_prefix,
+        )
+        if save_error:
+            return _error_response(
+                error=save_error,
+                code="image_save_failed",
+                details={"model": model, "output_dir": str(output_path)},
+                legacy_text=save_error,
+                request_id=request_id,
+            )
+
+        params_used: dict[str, Any] = {"size": size}
+        params_used.update(payload_plan.get("resolved_provider_params", {}))
+
+        legacy_text = f"Imagem gerada com sucesso! (Modelo: {model})\n\nPrompt: {sanitized_prompt}\n"
         if negative_prompt:
-            result += f"Negative Prompt: {negative_prompt}\n"
-        result += f"Parameters: size={size}"
-        if aspect_ratio:
-            result += f", aspect_ratio={aspect_ratio}"
-        if resolution:
-            result += f", resolution={resolution}"
-        if cfg_scale:
-            result += f", cfg_scale={cfg_scale}"
-        result += "\n\nGenerated files:\n"
-        
+            legacy_text += f"Negative Prompt: {negative_prompt}\n"
+        legacy_text += f"Parameters: {params_used}\n\nGenerated files:\n"
         for file_path in saved_files:
-            result += f"- {file_path}\n"
-            
-        return result
-        
+            legacy_text += f"- {file_path}\n"
+
+        return _success_response(
+            data={
+                "operation": "generate_image",
+                "model": model,
+                "prompt": sanitized_prompt,
+                "params": params_used,
+                "param_sources": payload_plan.get("param_sources", {}),
+                "transport": transport_meta,
+                "style_check": {
+                    "strict_style_check": strict_style_check,
+                    "checked": style_check_payload is not None,
+                    "state": style_check_payload.get("availability_state") if style_check_payload else None,
+                    "matched_style": style_check_payload.get("matched_style") if style_check_payload else None,
+                    "suggestions": style_check_payload.get("suggestions") if style_check_payload else [],
+                },
+                "model_check": {
+                    "strict_model_check": strict_model_check,
+                    "checked_at": precheck_payload.get("checked_at") if precheck_payload else None,
+                    "provider_check": precheck_payload.get("provider_check") if precheck_payload else None,
+                    "catalog_check": precheck_payload.get("catalog_check") if precheck_payload else None,
+                },
+                "runtime_override_keys": payload_plan.get("runtime_override_keys", []),
+                "output_dir": str(output_path),
+                "files": saved_files,
+                "count": len(saved_files),
+            },
+            legacy_text=legacy_text,
+            request_id=request_id,
+        )
+
     except Exception as e:
-        return f"Erro ao gerar imagem com o provedor: {str(e)}"
+        return _error_response(
+            error=f"Erro ao gerar imagem com o provedor: {str(e)}",
+            code="generation_failed",
+            details={"model": model},
+            legacy_text=f"Erro ao gerar imagem com o provedor: {str(e)}",
+            request_id=request_id,
+        )
 
 @mcp.tool()
 def edit_image(
@@ -128,20 +1973,253 @@ def edit_image(
     image_path: str,
     prompt: str,
     mask_path: Optional[str] = None,
-    model: str = "gpt-image-1",
+    model: str = "qwen-image-2-edit",
     size: Optional[str] = None,
     quality: Optional[str] = None,
     n: int = 1,
-    output_dir: str = "./edited_images",
-    filename_prefix: str = "edited"
+    output_dir: Optional[str] = None,
+    filename_prefix: str = "edited",
+    strict_model_check: bool = True,
+    force_model_refresh: bool = False
 ) -> str:
     """
-    [AVISO: Ferramenta temporariamente desativada]
-    Edit or extend existing images using OpenAI's image editing capabilities.
-    """
-    return "Aviso: A edição de imagem (inpaint/outpaint) pode não ser totalmente suportada pelo provedor atual (ex: Venice.ai). Esta função foi temporariamente desativada para focar na estabilidade."
+    Edit an existing image with model-card and safety validation.
 
-@mcp.tool()
+    Recommended sequence:
+    1) `recommend_model_for_intent(task_type="image_edit", ...)`
+    2) `verify_model_availability(task_type="image_edit")`
+    3) `edit_image`
+
+    Constraints:
+    - all file paths must stay inside `working_dir`;
+    - `n` must be within `[1, MAX_EDIT_IMAGES_PER_REQUEST]`;
+    - with strict checks enabled, model must be card-valid for `image_edit`.
+    - `output_dir` defaults to `/home/bill-kopp/Pictures` (or
+      `PERCIVAL_IMAGE_MCP_DEFAULT_OUTPUT_DIR`).
+    """
+    request_id = _new_request_id()
+    try:
+        working_path, working_error = _validate_working_dir(working_dir)
+        if working_error:
+            return _error_response(
+                error=working_error,
+                code="invalid_working_dir",
+                details={"working_dir": working_dir},
+                legacy_text=working_error,
+                request_id=request_id,
+            )
+
+        prompt_max_chars = _env_int("PERCIVAL_IMAGE_MCP_MAX_PROMPT_CHARS", DEFAULT_MAX_PROMPT_CHARS)
+        sanitized_prompt, prompt_error = _sanitize_text_with_limit(
+            prompt,
+            field_name="prompt",
+            max_chars=prompt_max_chars,
+        )
+        if prompt_error:
+            return _error_response(
+                error=prompt_error,
+                code="invalid_prompt",
+                details={"prompt": prompt},
+                legacy_text=f"Error: {prompt_error}",
+                request_id=request_id,
+            )
+
+        model_error = _validate_model_id(model)
+        if model_error:
+            return _error_response(
+                error=model_error,
+                code="invalid_model_id",
+                details={"model": model},
+                legacy_text=f"Error: {model_error}",
+                request_id=request_id,
+            )
+
+        prefix_error = _validate_filename_prefix(filename_prefix)
+        if prefix_error:
+            return _error_response(
+                error=prefix_error,
+                code="invalid_filename_prefix",
+                details={"filename_prefix": filename_prefix},
+                legacy_text=f"Error: {prefix_error}",
+                request_id=request_id,
+            )
+
+        if n < 1 or n > MAX_EDIT_IMAGES_PER_REQUEST:
+            return _error_response(
+                error=f"n must be between 1 and {MAX_EDIT_IMAGES_PER_REQUEST}.",
+                code="invalid_n",
+                details={"n": n, "max": MAX_EDIT_IMAGES_PER_REQUEST},
+                legacy_text=f"Error: n must be between 1 and {MAX_EDIT_IMAGES_PER_REQUEST}.",
+                request_id=request_id,
+            )
+
+        effective_output_dir = output_dir or str(_get_default_output_directory())
+        resolved_output_path, output_error = _resolve_output_path(
+            path_value=effective_output_dir,
+            working_path=working_path,
+            label="output_dir",
+        )
+        if output_error:
+            return _error_response(
+                error=output_error,
+                code="invalid_output_dir",
+                details={"output_dir": effective_output_dir, "working_dir": str(working_path)},
+                legacy_text=output_error,
+                request_id=request_id,
+            )
+
+        precheck_error, precheck_payload = _enforce_model_precheck(
+            model_id=model,
+            task_type="image_edit",
+            strict_model_check=strict_model_check,
+            force_model_refresh=force_model_refresh,
+        )
+        if precheck_error:
+            return _error_response(
+                error=precheck_error["error"],
+                code=precheck_error["code"],
+                details=precheck_error.get("details"),
+                legacy_text=f"Error: {precheck_error['error']}",
+                request_id=request_id,
+            )
+
+        is_valid, error_message, resolved_image_path = validate_image_path(image_path, "read", working_dir)
+        if not is_valid:
+            error = error_message or "Error: Invalid image_path."
+            return _error_response(
+                error=error,
+                code="invalid_image_path",
+                details={"image_path": image_path},
+                legacy_text=error,
+                request_id=request_id,
+            )
+
+        confined_image_path, confinement_error = _enforce_existing_file_in_working_dir(
+            resolved_path=resolved_image_path,
+            working_path=working_path,
+            label="image_path",
+            provided_path=image_path,
+        )
+        if confinement_error:
+            return _error_response(
+                error=confinement_error,
+                code="invalid_image_path_scope",
+                details={"image_path": image_path, "working_dir": str(working_path)},
+                legacy_text=confinement_error,
+                request_id=request_id,
+            )
+
+        resolved_mask_path: Optional[Path] = None
+        if mask_path:
+            mask_ok, mask_error, resolved_mask_path = validate_image_path(mask_path, "read", working_dir)
+            if not mask_ok:
+                error = mask_error or "Error: Invalid mask_path."
+                return _error_response(
+                    error=error,
+                    code="invalid_mask_path",
+                    details={"mask_path": mask_path},
+                    legacy_text=error,
+                    request_id=request_id,
+                )
+
+            confined_mask_path, mask_confinement_error = _enforce_existing_file_in_working_dir(
+                resolved_path=resolved_mask_path,
+                working_path=working_path,
+                label="mask_path",
+                provided_path=mask_path,
+            )
+            if mask_confinement_error:
+                return _error_response(
+                    error=mask_confinement_error,
+                    code="invalid_mask_path_scope",
+                    details={"mask_path": mask_path, "working_dir": str(working_path)},
+                    legacy_text=mask_confinement_error,
+                    request_id=request_id,
+                )
+            resolved_mask_path = confined_mask_path
+
+        output_path = resolved_output_path
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        edit_kwargs: dict[str, Any] = {
+            "model": model,
+            "prompt": sanitized_prompt,
+            "n": n,
+            "response_format": "b64_json",
+        }
+        if size:
+            edit_kwargs["size"] = size
+        if quality:
+            edit_kwargs["quality"] = quality
+
+        with open(confined_image_path, "rb") as image_file:
+            edit_kwargs["image"] = image_file
+            if resolved_mask_path:
+                with open(resolved_mask_path, "rb") as mask_file:
+                    edit_kwargs["mask"] = mask_file
+                    response = client.images.edit(**edit_kwargs)
+            else:
+                response = client.images.edit(**edit_kwargs)
+
+        saved_files, save_error = _save_images_from_response(
+            response=response,
+            output_path=output_path,
+            filename_prefix=filename_prefix,
+        )
+        if save_error:
+            return _error_response(
+                error=save_error,
+                code="image_save_failed",
+                details={"model": model, "output_dir": str(output_path)},
+                legacy_text=save_error,
+                request_id=request_id,
+            )
+
+        params_used: dict[str, Any] = {"n": n}
+        if size:
+            params_used["size"] = size
+        if quality:
+            params_used["quality"] = quality
+
+        legacy_text = f"Imagem editada com sucesso! (Modelo: {model})\n\n"
+        legacy_text += f"Prompt: {sanitized_prompt}\n"
+        legacy_text += f"Source image: {confined_image_path}\n"
+        if resolved_mask_path:
+            legacy_text += f"Mask image: {resolved_mask_path}\n"
+        legacy_text += f"Parameters: {params_used}\n\nEdited files:\n"
+        for file_path in saved_files:
+            legacy_text += f"- {file_path}\n"
+
+        return _success_response(
+            data={
+                "operation": "edit_image",
+                "model": model,
+                "prompt": sanitized_prompt,
+                "source_image": str(confined_image_path),
+                "mask_image": str(resolved_mask_path) if resolved_mask_path else None,
+                "params": params_used,
+                "model_check": {
+                    "strict_model_check": strict_model_check,
+                    "checked_at": precheck_payload.get("checked_at") if precheck_payload else None,
+                    "provider_check": precheck_payload.get("provider_check") if precheck_payload else None,
+                    "catalog_check": precheck_payload.get("catalog_check") if precheck_payload else None,
+                },
+                "output_dir": str(output_path),
+                "files": saved_files,
+                "count": len(saved_files),
+            },
+            legacy_text=legacy_text,
+            request_id=request_id,
+        )
+    except Exception as exc:
+        return _error_response(
+            error=f"Erro ao editar imagem com o provedor: {str(exc)}",
+            code="edit_failed",
+            details={"model": model},
+            legacy_text=f"Erro ao editar imagem com o provedor: {str(exc)}",
+            request_id=request_id,
+        )
+
 def create_image_variations(
     working_dir: str,
     image_path: str,
@@ -154,37 +2232,70 @@ def create_image_variations(
     [AVISO: Ferramenta temporariamente desativada]
     Create variations of an existing image using DALL-E 2.
     """
-    return "Aviso: A criação de variações de imagem pode não ser totalmente suportada pelo provedor atual (ex: Venice.ai). Esta função foi temporariamente desativada."
+    # Intencionalmente não registrado como tool MCP para evitar uso pelo agente.
+    return "Aviso: A criação de variações de imagem permanece desativada neste servidor."
 
 @mcp.tool()
-def list_generated_images(working_dir: str, directory: str = "generated_images") -> str:
+def list_generated_images(working_dir: str, directory: Optional[str] = None) -> str:
     """
-    List all generated images in a directory with metadata.
-    
-    Args:
-        working_dir: Absolute path to the working directory for file operations
-        directory: Directory relative to working_dir to scan for generated images
-    
+    List generated image files in a directory with basic metadata.
+
+    Behavior:
+    - scans only inside validated `working_dir` or configured default output directory;
+    - filters image extensions (`png`, `jpg`, `jpeg`, `gif`, `webp`);
+    - sorts by modified time (newest first);
+    - may truncate result set by `PERCIVAL_IMAGE_MCP_MAX_LIST_FILES`.
+
     Returns:
-        List of generated images with their metadata
+    - structured envelope with `images` array and `truncated` flag.
     """
+    request_id = _new_request_id()
     try:
         # Validate working directory
-        working_path = Path(working_dir)
-        if not working_path.is_absolute():
-            return f"Error: working_dir must be an absolute path, got: {working_dir}"
-        if not working_path.exists():
-            return f"Error: working_dir does not exist: {working_dir}"
-        if not working_path.is_dir():
-            return f"Error: working_dir is not a directory: {working_dir}"
-        
-        # Create directory path relative to working directory
-        dir_path = working_path / directory
+        working_path, working_error = _validate_working_dir(working_dir)
+        if working_error:
+            return _error_response(
+                error=working_error,
+                code="invalid_working_dir",
+                details={"working_dir": working_dir},
+                legacy_text=working_error,
+                request_id=request_id,
+            )
+
+        effective_directory = directory or str(_get_default_output_directory())
+        dir_path, dir_error = _resolve_output_path(
+            path_value=effective_directory,
+            working_path=working_path,
+            label="directory",
+        )
+        if dir_error:
+            return _error_response(
+                error=dir_error,
+                code="invalid_directory_scope",
+                details={"directory": effective_directory, "working_dir": str(working_path)},
+                legacy_text=dir_error,
+                request_id=request_id,
+            )
+
         if not dir_path.exists():
-            return f"Directory '{directory}' does not exist"
+            error = f"Directory '{effective_directory}' does not exist"
+            return _error_response(
+                error=error,
+                code="directory_not_found",
+                details={"directory": effective_directory},
+                legacy_text=error,
+                request_id=request_id,
+            )
         
         if not dir_path.is_dir():
-            return f"'{directory}' is not a directory"
+            error = f"'{effective_directory}' is not a directory"
+            return _error_response(
+                error=error,
+                code="invalid_directory",
+                details={"directory": effective_directory},
+                legacy_text=error,
+                request_id=request_id,
+            )
         
         # Find image files
         image_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.webp'}
@@ -195,33 +2306,78 @@ def list_generated_images(working_dir: str, directory: str = "generated_images")
                 image_files.append(file_path)
         
         if not image_files:
-            return f"No image files found in '{directory}'"
+            message = f"No image files found in '{effective_directory}'"
+            return _success_response(
+                data={"directory": effective_directory, "count": 0, "images": []},
+                legacy_text=message,
+                request_id=request_id,
+            )
         
         # Sort by modification time (newest first)
         image_files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+
+        max_list_items = _env_int("PERCIVAL_IMAGE_MCP_MAX_LIST_FILES", DEFAULT_MAX_LIST_FILES)
+        truncated = False
+        if len(image_files) > max_list_items:
+            record_security_event(
+                "input_validation_blocked",
+                {"field": "list_generated_images", "reason": "result_set_truncated", "max_items": max_list_items},
+            )
+            image_files = image_files[:max_list_items]
+            truncated = True
         
-        result = f"Generated Images in '{directory}':\n"
-        result += f"Found {len(image_files)} image file(s)\n\n"
-        
-        from utils.openai_client import get_image_info
-        import time
+        images_data: list[dict[str, Any]] = []
+        legacy_lines = [
+            f"Generated Images in '{effective_directory}':",
+            f"Found {len(image_files)} image file(s)",
+            "",
+        ]
         
         for i, file_path in enumerate(image_files, 1):
             file_stats = file_path.stat()
             image_info = get_image_info(file_path)
-            
-            result += f"{i}. {file_path.name}\n"
-            result += f"   Path: {file_path}\n"
-            result += f"   Size: {file_stats.st_size:,} bytes ({file_stats.st_size / 1024 / 1024:.2f} MB)\n"
-            result += f"   Modified: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(file_stats.st_mtime))}\n"
-            
+
+            entry: dict[str, Any] = {
+                "index": i,
+                "name": file_path.name,
+                "path": str(file_path),
+                "size_bytes": file_stats.st_size,
+                "size_mb": round(file_stats.st_size / 1024 / 1024, 4),
+                "modified": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(file_stats.st_mtime)),
+            }
             if "error" not in image_info:
-                result += f"   Dimensions: {image_info['size'][0]}x{image_info['size'][1]} pixels\n"
-                result += f"   Format: {image_info.get('format', 'Unknown')}\n"
-            
-            result += "\n"
-        
-        return result
+                entry["dimensions"] = f"{image_info['size'][0]}x{image_info['size'][1]}"
+                entry["format"] = image_info.get("format", "Unknown")
+            images_data.append(entry)
+
+            legacy_lines.append(f"{i}. {file_path.name}")
+            legacy_lines.append(f"   Path: {file_path}")
+            legacy_lines.append(
+                f"   Size: {file_stats.st_size:,} bytes ({file_stats.st_size / 1024 / 1024:.2f} MB)"
+            )
+            legacy_lines.append(
+                f"   Modified: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(file_stats.st_mtime))}"
+            )
+            if "error" not in image_info:
+                legacy_lines.append(f"   Dimensions: {image_info['size'][0]}x{image_info['size'][1]} pixels")
+                legacy_lines.append(f"   Format: {image_info.get('format', 'Unknown')}")
+            legacy_lines.append("")
+
+        return _success_response(
+            data={
+                "directory": effective_directory,
+                "count": len(images_data),
+                "truncated": truncated,
+                "images": images_data,
+            },
+            legacy_text="\n".join(legacy_lines),
+            request_id=request_id,
+        )
         
     except Exception as e:
-        return f"Error listing generated images: {str(e)}" 
+        return _error_response(
+            error=f"Error listing generated images: {str(e)}",
+            code="list_generated_images_failed",
+            legacy_text=f"Error listing generated images: {str(e)}",
+            request_id=request_id,
+        )

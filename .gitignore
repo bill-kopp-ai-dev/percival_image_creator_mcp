@@ -9,5 +9,22 @@ wheels/
 # Virtual environments
 .venv
 
+# Test and coverage artifacts
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+
+# Runtime generated outputs
+generated/
+generated_images/
+
+# Logs and OS/editor noise
+*.log
+.DS_Store
+.idea/
+.vscode/
+
 # Test data
 test_data/

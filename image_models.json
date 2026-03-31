@@ -1,0 +1,899 @@
+{
+  "schema_version": "2.1",
+  "provider": "venice.ai",
+  "catalog_version": "2026-03-29",
+  "last_updated": "2026-03-30",
+  "default_task_type": "text_to_image",
+  "supported_task_types": [
+    "text_to_image",
+    "image_edit",
+    "upscaling",
+    "background_removal"
+  ],
+  "image_models": [
+    {
+      "id": "venice-sd35",
+      "name": "Venice SD35",
+      "description": "A high-speed, versatile image generator based on the latest Stable Diffusion architecture.",
+      "task_types": ["text_to_image"],
+      "status": "active",
+      "capabilities": {
+        "supports_generation": true,
+        "supports_edit": false,
+        "supports_upscaling": false,
+        "supports_background_removal": false
+      },
+      "pricing": { "currency": "USD", "per_image": 0.01, "per_edit": null },
+      "quality_tier": "entry",
+      "speed_tier": "fast",
+      "recommended_use_cases": ["general_generation", "creative_concepts"],
+      "avoid_use_cases": ["pixel_perfect_logos_without_post_editing"],
+      "aliases": [],
+      "cost_per_image": "$0.01",
+      "recommended_api_params": {
+        "cfg_scale": 4.5,
+        "steps": 25,
+        "aspect_ratio": "1:1",
+        "format": "webp"
+      }
+    },
+    {
+      "id": "hidream",
+      "name": "HiDream",
+      "description": "Optimized for fast generation with high artistic quality at a competitive entry-level price.",
+      "task_types": ["text_to_image"],
+      "status": "active",
+      "capabilities": {
+        "supports_generation": true,
+        "supports_edit": false,
+        "supports_upscaling": false,
+        "supports_background_removal": false
+      },
+      "pricing": { "currency": "USD", "per_image": 0.01, "per_edit": null },
+      "quality_tier": "entry",
+      "speed_tier": "fast",
+      "recommended_use_cases": ["general_generation", "creative_concepts", "rapid_prototyping"],
+      "avoid_use_cases": ["pixel_perfect_logos_without_post_editing"],
+      "aliases": [],
+      "cost_per_image": "$0.01",
+      "recommended_api_params": {
+        "cfg_scale": 3.0,
+        "steps": 15,
+        "aspect_ratio": "16:9",
+        "format": "webp"
+      }
+    },
+    {
+      "id": "flux-2-pro",
+      "name": "Flux 2 Pro",
+      "description": "Professional-grade model with superior prompt adherence and realistic details.",
+      "task_types": ["text_to_image"],
+      "status": "active",
+      "capabilities": {
+        "supports_generation": true,
+        "supports_edit": false,
+        "supports_upscaling": false,
+        "supports_background_removal": false
+      },
+      "pricing": { "currency": "USD", "per_image": 0.04, "per_edit": null },
+      "quality_tier": "standard",
+      "speed_tier": "balanced",
+      "recommended_use_cases": ["general_generation", "creative_concepts"],
+      "avoid_use_cases": ["pixel_perfect_logos_without_post_editing"],
+      "aliases": [],
+      "cost_per_image": "$0.04",
+      "recommended_api_params": {
+        "cfg_scale": 1.0,
+        "steps": 25,
+        "aspect_ratio": "16:9",
+        "format": "webp"
+      }
+    },
+    {
+      "id": "flux-2-max",
+      "name": "Flux 2 Max",
+      "description": "The most powerful version of the Flux series, delivering maximum detail and high resolution.",
+      "task_types": ["text_to_image"],
+      "status": "active",
+      "capabilities": {
+        "supports_generation": true,
+        "supports_edit": false,
+        "supports_upscaling": false,
+        "supports_background_removal": false
+      },
+      "pricing": { "currency": "USD", "per_image": 0.09, "per_edit": null },
+      "quality_tier": "pro",
+      "speed_tier": "slow",
+      "recommended_use_cases": ["general_generation", "creative_concepts"],
+      "avoid_use_cases": ["pixel_perfect_logos_without_post_editing"],
+      "aliases": [],
+      "cost_per_image": "$0.09",
+      "recommended_api_params": {
+        "cfg_scale": 1.0,
+        "steps": 30,
+        "aspect_ratio": "16:9",
+        "format": "webp"
+      }
+    },
+    {
+      "id": "gpt-image-1-5",
+      "name": "GPT Image 1.5",
+      "description": "Advanced reasoning-based image generation with deep semantic understanding.",
+      "task_types": ["text_to_image"],
+      "status": "active",
+      "capabilities": {
+        "supports_generation": true,
+        "supports_edit": false,
+        "supports_upscaling": false,
+        "supports_background_removal": false
+      },
+      "pricing": { "currency": "USD", "per_image": 0.26, "per_edit": null },
+      "quality_tier": "premium",
+      "speed_tier": "balanced",
+      "recommended_use_cases": ["general_generation", "creative_concepts", "semantic_accuracy"],
+      "avoid_use_cases": ["pixel_perfect_logos_without_post_editing"],
+      "aliases": [],
+      "cost_per_image": "$0.26",
+      "recommended_api_params": {
+        "cfg_scale": 7.0,
+        "steps": 30,
+        "aspect_ratio": "1:1",
+        "format": "webp"
+      }
+    },
+    {
+      "id": "grok-imagine",
+      "name": "Grok Imagine",
+      "description": "xAI's image generation model, known for creative interpretations and moderated output.",
+      "task_types": ["text_to_image"],
+      "status": "active",
+      "capabilities": {
+        "supports_generation": true,
+        "supports_edit": false,
+        "supports_upscaling": false,
+        "supports_background_removal": false
+      },
+      "pricing": { "currency": "USD", "per_image": 0.04, "per_edit": null },
+      "quality_tier": "standard",
+      "speed_tier": "balanced",
+      "recommended_use_cases": ["general_generation", "creative_concepts"],
+      "avoid_use_cases": ["pixel_perfect_logos_without_post_editing"],
+      "aliases": [],
+      "cost_per_image": "$0.04",
+      "recommended_api_params": {
+        "cfg_scale": 5.0,
+        "steps": 25,
+        "aspect_ratio": "16:9",
+        "format": "webp"
+      }
+    },
+    {
+      "id": "hunyuan-image-v3",
+      "name": "Hunyuan Image 3.0",
+      "description": "Tencent's state-of-the-art model with excellent composition and clarity.",
+      "task_types": ["text_to_image"],
+      "status": "active",
+      "capabilities": {
+        "supports_generation": true,
+        "supports_edit": false,
+        "supports_upscaling": false,
+        "supports_background_removal": false
+      },
+      "pricing": { "currency": "USD", "per_image": 0.09, "per_edit": null },
+      "quality_tier": "pro",
+      "speed_tier": "balanced",
+      "recommended_use_cases": ["general_generation", "creative_concepts"],
+      "avoid_use_cases": ["pixel_perfect_logos_without_post_editing"],
+      "aliases": [],
+      "cost_per_image": "$0.09",
+      "recommended_api_params": {
+        "cfg_scale": 6.0,
+        "steps": 30,
+        "aspect_ratio": "16:9",
+        "format": "webp"
+      }
+    },
+    {
+      "id": "imagine-art-1-5-pro",
+      "name": "ImagineArt 1.5 Pro",
+      "description": "Professional artistic model designed for high-fidelity digital art and stylized concepts.",
+      "task_types": ["text_to_image"],
+      "status": "active",
+      "capabilities": {
+        "supports_generation": true,
+        "supports_edit": false,
+        "supports_upscaling": false,
+        "supports_background_removal": false
+      },
+      "pricing": { "currency": "USD", "per_image": 0.06, "per_edit": null },
+      "quality_tier": "pro",
+      "speed_tier": "balanced",
+      "recommended_use_cases": ["general_generation", "creative_concepts"],
+      "avoid_use_cases": ["pixel_perfect_logos_without_post_editing"],
+      "aliases": [],
+      "cost_per_image": "$0.06",
+      "recommended_api_params": {
+        "cfg_scale": 7.0,
+        "steps": 30,
+        "aspect_ratio": "9:16",
+        "format": "webp"
+      }
+    },
+    {
+      "id": "nano-banana-2",
+      "name": "Nano Banana 2",
+      "description": "Efficient next-generation model balancing speed and aesthetic appeal.",
+      "task_types": ["text_to_image"],
+      "status": "active",
+      "capabilities": {
+        "supports_generation": true,
+        "supports_edit": false,
+        "supports_upscaling": false,
+        "supports_background_removal": false
+      },
+      "pricing": { "currency": "USD", "per_image": 0.1, "per_edit": null },
+      "quality_tier": "pro",
+      "speed_tier": "fast",
+      "recommended_use_cases": ["general_generation", "creative_concepts"],
+      "avoid_use_cases": ["pixel_perfect_logos_without_post_editing"],
+      "aliases": [],
+      "cost_per_image": "$0.10",
+      "recommended_api_params": {
+        "cfg_scale": 4.5,
+        "steps": 25,
+        "aspect_ratio": "1:1",
+        "format": "webp"
+      }
+    },
+    {
+      "id": "nano-banana-pro",
+      "name": "Nano Banana Pro",
+      "description": "High-performance model optimized for ultra-high-resolution assets up to 4K.",
+      "task_types": ["text_to_image"],
+      "status": "active",
+      "capabilities": {
+        "supports_generation": true,
+        "supports_edit": false,
+        "supports_upscaling": false,
+        "supports_background_removal": false
+      },
+      "pricing": { "currency": "USD", "per_image": 0.18, "per_edit": null },
+      "quality_tier": "premium",
+      "speed_tier": "slow",
+      "recommended_use_cases": ["general_generation", "creative_concepts"],
+      "avoid_use_cases": ["pixel_perfect_logos_without_post_editing"],
+      "aliases": [],
+      "cost_per_image": "$0.18",
+      "recommended_api_params": {
+        "cfg_scale": 5.0,
+        "steps": 30,
+        "aspect_ratio": "16:9",
+        "format": "webp"
+      }
+    },
+    {
+      "id": "recraft-v4",
+      "name": "Recraft V4",
+      "description": "Specialized in clean graphic design-oriented imagery, logos, and flat illustrations.",
+      "task_types": ["text_to_image"],
+      "status": "active",
+      "capabilities": {
+        "supports_generation": true,
+        "supports_edit": false,
+        "supports_upscaling": false,
+        "supports_background_removal": false
+      },
+      "pricing": { "currency": "USD", "per_image": 0.05, "per_edit": null },
+      "quality_tier": "standard",
+      "speed_tier": "balanced",
+      "recommended_use_cases": ["general_generation", "creative_concepts", "graphic_design"],
+      "avoid_use_cases": ["pixel_perfect_logos_without_post_editing"],
+      "aliases": [],
+      "cost_per_image": "$0.05",
+      "recommended_api_params": {
+        "cfg_scale": 5.0,
+        "steps": 20,
+        "aspect_ratio": "1:1",
+        "format": "webp"
+      }
+    },
+    {
+      "id": "recraft-v4-pro",
+      "name": "Recraft V4 Pro",
+      "description": "Premium design model with advanced vector-like clarity and layout control.",
+      "task_types": ["text_to_image"],
+      "status": "active",
+      "capabilities": {
+        "supports_generation": true,
+        "supports_edit": false,
+        "supports_upscaling": false,
+        "supports_background_removal": false
+      },
+      "pricing": { "currency": "USD", "per_image": 0.29, "per_edit": null },
+      "quality_tier": "premium",
+      "speed_tier": "slow",
+      "recommended_use_cases": ["general_generation", "creative_concepts", "graphic_design"],
+      "avoid_use_cases": ["pixel_perfect_logos_without_post_editing"],
+      "aliases": [],
+      "cost_per_image": "$0.29",
+      "recommended_api_params": {
+        "cfg_scale": 5.0,
+        "steps": 25,
+        "aspect_ratio": "16:9",
+        "format": "webp"
+      }
+    },
+    {
+      "id": "seedream-v4",
+      "name": "SeedreamV4.5",
+      "description": "A community favorite for creative, ethereal aesthetics and diverse stylistic outputs.",
+      "task_types": ["text_to_image"],
+      "status": "active",
+      "capabilities": {
+        "supports_generation": true,
+        "supports_edit": false,
+        "supports_upscaling": false,
+        "supports_background_removal": false
+      },
+      "pricing": { "currency": "USD", "per_image": 0.05, "per_edit": null },
+      "quality_tier": "standard",
+      "speed_tier": "balanced",
+      "recommended_use_cases": ["general_generation", "creative_concepts"],
+      "avoid_use_cases": ["pixel_perfect_logos_without_post_editing"],
+      "aliases": [],
+      "cost_per_image": "$0.05",
+      "recommended_api_params": {
+        "cfg_scale": 7.0,
+        "steps": 30,
+        "aspect_ratio": "1:1",
+        "format": "webp"
+      }
+    },
+    {
+      "id": "seedream-v5-lite",
+      "name": "SeedreamV5 Lite",
+      "description": "Faster, lighter version of Seedream V5 designed for rapid prototyping.",
+      "task_types": ["text_to_image"],
+      "status": "active",
+      "capabilities": {
+        "supports_generation": true,
+        "supports_edit": false,
+        "supports_upscaling": false,
+        "supports_background_removal": false
+      },
+      "pricing": { "currency": "USD", "per_image": 0.05, "per_edit": null },
+      "quality_tier": "standard",
+      "speed_tier": "fast",
+      "recommended_use_cases": ["general_generation", "creative_concepts", "rapid_prototyping"],
+      "avoid_use_cases": ["pixel_perfect_logos_without_post_editing"],
+      "aliases": [],
+      "cost_per_image": "$0.05",
+      "recommended_api_params": {
+        "cfg_scale": 2.0,
+        "steps": 8,
+        "aspect_ratio": "1:1",
+        "format": "webp"
+      }
+    },
+    {
+      "id": "qwen-image-2",
+      "name": "Qwen Image 2",
+      "description": "Alibaba's updated vision-centric model with improved realism and texture.",
+      "task_types": ["text_to_image"],
+      "status": "active",
+      "capabilities": {
+        "supports_generation": true,
+        "supports_edit": false,
+        "supports_upscaling": false,
+        "supports_background_removal": false
+      },
+      "pricing": { "currency": "USD", "per_image": 0.05, "per_edit": null },
+      "quality_tier": "standard",
+      "speed_tier": "balanced",
+      "recommended_use_cases": ["general_generation", "creative_concepts"],
+      "avoid_use_cases": ["pixel_perfect_logos_without_post_editing"],
+      "aliases": [],
+      "cost_per_image": "$0.05",
+      "recommended_api_params": {
+        "cfg_scale": 5.0,
+        "steps": 25,
+        "aspect_ratio": "16:9",
+        "format": "webp"
+      }
+    },
+    {
+      "id": "qwen-image-2-pro",
+      "name": "Qwen Image 2 Pro",
+      "description": "High-performance vision model tailored for complex multi-subject scenes.",
+      "task_types": ["text_to_image"],
+      "status": "active",
+      "capabilities": {
+        "supports_generation": true,
+        "supports_edit": false,
+        "supports_upscaling": false,
+        "supports_background_removal": false
+      },
+      "pricing": { "currency": "USD", "per_image": 0.1, "per_edit": null },
+      "quality_tier": "pro",
+      "speed_tier": "slow",
+      "recommended_use_cases": ["general_generation", "creative_concepts"],
+      "avoid_use_cases": ["pixel_perfect_logos_without_post_editing"],
+      "aliases": [],
+      "cost_per_image": "$0.10",
+      "recommended_api_params": {
+        "cfg_scale": 5.0,
+        "steps": 30,
+        "aspect_ratio": "16:9",
+        "format": "webp"
+      }
+    },
+    {
+      "id": "lustify-sdxl",
+      "name": "Lustify SDXL",
+      "description": "Uncensored model based on SDXL, optimized for photorealistic human figures.",
+      "task_types": ["text_to_image"],
+      "status": "active",
+      "capabilities": {
+        "supports_generation": true,
+        "supports_edit": false,
+        "supports_upscaling": false,
+        "supports_background_removal": false
+      },
+      "pricing": { "currency": "USD", "per_image": 0.01, "per_edit": null },
+      "quality_tier": "entry",
+      "speed_tier": "balanced",
+      "recommended_use_cases": ["general_generation", "creative_concepts", "photorealistic_human_figures"],
+      "avoid_use_cases": ["pixel_perfect_logos_without_post_editing"],
+      "aliases": [],
+      "cost_per_image": "$0.01",
+      "recommended_api_params": {
+        "cfg_scale": 5.0,
+        "steps": 25,
+        "aspect_ratio": "9:16",
+        "format": "webp"
+      }
+    },
+    {
+      "id": "lustify-v7",
+      "name": "Lustify v7",
+      "description": "Advanced uncensored generation with superior anatomy and style consistency.",
+      "task_types": ["text_to_image"],
+      "status": "active",
+      "capabilities": {
+        "supports_generation": true,
+        "supports_edit": false,
+        "supports_upscaling": false,
+        "supports_background_removal": false
+      },
+      "pricing": { "currency": "USD", "per_image": 0.01, "per_edit": null },
+      "quality_tier": "entry",
+      "speed_tier": "balanced",
+      "recommended_use_cases": ["general_generation", "creative_concepts", "photorealistic_human_figures"],
+      "avoid_use_cases": ["pixel_perfect_logos_without_post_editing"],
+      "aliases": [],
+      "cost_per_image": "$0.01",
+      "recommended_api_params": {
+        "cfg_scale": 5.0,
+        "steps": 25,
+        "aspect_ratio": "9:16",
+        "format": "webp"
+      }
+    },
+    {
+      "id": "qwen-image",
+      "name": "Qwen Image",
+      "description": "Base private vision-to-image model from the Qwen series for general-purpose tasks.",
+      "task_types": ["text_to_image"],
+      "status": "active",
+      "capabilities": {
+        "supports_generation": true,
+        "supports_edit": false,
+        "supports_upscaling": false,
+        "supports_background_removal": false
+      },
+      "pricing": { "currency": "USD", "per_image": 0.01, "per_edit": null },
+      "quality_tier": "entry",
+      "speed_tier": "fast",
+      "recommended_use_cases": ["general_generation", "creative_concepts"],
+      "avoid_use_cases": ["pixel_perfect_logos_without_post_editing"],
+      "aliases": [],
+      "cost_per_image": "$0.01",
+      "recommended_api_params": {
+        "cfg_scale": 5.0,
+        "steps": 20,
+        "aspect_ratio": "1:1",
+        "format": "webp"
+      }
+    },
+    {
+      "id": "anime-wai",
+      "name": "Anime (WAI)",
+      "description": "Specialized in high-quality anime, manga, and illustrative styles.",
+      "task_types": ["text_to_image"],
+      "status": "active",
+      "capabilities": {
+        "supports_generation": true,
+        "supports_edit": false,
+        "supports_upscaling": false,
+        "supports_background_removal": false
+      },
+      "pricing": { "currency": "USD", "per_image": 0.01, "per_edit": null },
+      "quality_tier": "entry",
+      "speed_tier": "fast",
+      "recommended_use_cases": ["general_generation", "creative_concepts", "anime_manga"],
+      "avoid_use_cases": ["pixel_perfect_logos_without_post_editing"],
+      "aliases": [],
+      "cost_per_image": "$0.01",
+      "recommended_api_params": {
+        "cfg_scale": 6.0,
+        "steps": 25,
+        "aspect_ratio": "16:9",
+        "format": "webp"
+      }
+    },
+    {
+      "id": "z-image-turbo",
+      "name": "Z-Image Turbo",
+      "description": "Built for near-instant generation, ideal for real-time applications.",
+      "task_types": ["text_to_image"],
+      "status": "active",
+      "capabilities": {
+        "supports_generation": true,
+        "supports_edit": false,
+        "supports_upscaling": false,
+        "supports_background_removal": false
+      },
+      "pricing": { "currency": "USD", "per_image": 0.01, "per_edit": null },
+      "quality_tier": "entry",
+      "speed_tier": "fast",
+      "recommended_use_cases": ["general_generation", "creative_concepts", "rapid_prototyping"],
+      "avoid_use_cases": ["pixel_perfect_logos_without_post_editing"],
+      "aliases": [],
+      "cost_per_image": "$0.01",
+      "recommended_api_params": {
+        "cfg_scale": 1.0,
+        "steps": 4,
+        "aspect_ratio": "1:1",
+        "format": "webp"
+      }
+    },
+    {
+      "id": "chroma",
+      "name": "Chroma",
+      "description": "Focuses on vibrant color palettes and striking visual contrasts.",
+      "task_types": ["text_to_image"],
+      "status": "active",
+      "capabilities": {
+        "supports_generation": true,
+        "supports_edit": false,
+        "supports_upscaling": false,
+        "supports_background_removal": false
+      },
+      "pricing": { "currency": "USD", "per_image": 0.01, "per_edit": null },
+      "quality_tier": "entry",
+      "speed_tier": "fast",
+      "recommended_use_cases": ["general_generation", "creative_concepts", "vivid_color_scenes"],
+      "avoid_use_cases": ["pixel_perfect_logos_without_post_editing"],
+      "aliases": [],
+      "cost_per_image": "$0.01",
+      "recommended_api_params": {
+        "cfg_scale": 6.0,
+        "steps": 25,
+        "aspect_ratio": "16:9",
+        "format": "webp"
+      }
+    },
+    {
+      "id": "background-remover",
+      "name": "Background Remover",
+      "description": "Utility model designed to accurately isolate subjects and remove backgrounds.",
+      "task_types": ["background_removal"],
+      "status": "active",
+      "capabilities": {
+        "supports_generation": false,
+        "supports_edit": false,
+        "supports_upscaling": false,
+        "supports_background_removal": true
+      },
+      "pricing": { "currency": "USD", "per_image": 0.03, "per_edit": null },
+      "quality_tier": "standard",
+      "speed_tier": "balanced",
+      "recommended_use_cases": ["subject_isolation", "transparent_background_assets"],
+      "avoid_use_cases": ["complex_manual_masking_with_hair_fine_tuning"],
+      "aliases": [],
+      "cost_per_image": "$0.03",
+      "recommended_api_params": {
+        "cfg_scale": 1.0,
+        "steps": 8,
+        "aspect_ratio": "1:1",
+        "format": "webp"
+      }
+    },
+    {
+      "id": "upscaler",
+      "name": "Upscaler",
+      "description": "Increases image resolution while maintaining fine details and reducing artifacts.",
+      "task_types": ["upscaling"],
+      "status": "active",
+      "capabilities": {
+        "supports_generation": false,
+        "supports_edit": false,
+        "supports_upscaling": true,
+        "supports_background_removal": false
+      },
+      "pricing": { "currency": "USD", "per_image": 0.02, "per_edit": null },
+      "quality_tier": "standard",
+      "speed_tier": "balanced",
+      "recommended_use_cases": ["resolution_enhancement", "detail_recovery"],
+      "avoid_use_cases": ["content_generation"],
+      "aliases": [],
+      "cost_per_image": "$0.02",
+      "recommended_api_params": {
+        "cfg_scale": 1.0,
+        "steps": 8,
+        "aspect_ratio": "1:1",
+        "format": "webp"
+      }
+    },
+    {
+      "id": "qwen-edit-2511",
+      "name": "Qwen Edit 2511",
+      "description": "Private inpainting model designed for precise image edits via natural language.",
+      "task_types": ["image_edit"],
+      "status": "active",
+      "capabilities": {
+        "supports_generation": false,
+        "supports_edit": true,
+        "supports_upscaling": false,
+        "supports_background_removal": false
+      },
+      "pricing": { "currency": "USD", "per_image": null, "per_edit": 0.04 },
+      "quality_tier": "standard",
+      "speed_tier": "balanced",
+      "recommended_use_cases": ["inpainting", "object_replacement", "targeted_modification"],
+      "avoid_use_cases": ["full_scene_generation_from_scratch"],
+      "aliases": [],
+      "cost_per_edit": "$0.04",
+      "recommended_api_params": {
+        "cfg_scale": 5.0,
+        "steps": 25,
+        "aspect_ratio": "1:1",
+        "format": "webp"
+      }
+    },
+    {
+      "id": "qwen-image-2-edit",
+      "name": "Qwen Image 2 (Edit)",
+      "description": "Advanced inpainting using the Qwen 2 architecture for high-quality modification.",
+      "task_types": ["image_edit"],
+      "status": "active",
+      "capabilities": {
+        "supports_generation": false,
+        "supports_edit": true,
+        "supports_upscaling": false,
+        "supports_background_removal": false
+      },
+      "pricing": { "currency": "USD", "per_image": null, "per_edit": 0.05 },
+      "quality_tier": "standard",
+      "speed_tier": "balanced",
+      "recommended_use_cases": ["inpainting", "object_replacement", "targeted_modification"],
+      "avoid_use_cases": ["full_scene_generation_from_scratch"],
+      "aliases": [],
+      "cost_per_edit": "$0.05",
+      "recommended_api_params": {
+        "cfg_scale": 5.0,
+        "steps": 25,
+        "aspect_ratio": "1:1",
+        "format": "webp"
+      }
+    },
+    {
+      "id": "qwen-image-2-pro-edit",
+      "name": "Qwen Image 2 Pro (Edit)",
+      "description": "Professional-tier inpainting for seamless edits in high-resolution images.",
+      "task_types": ["image_edit"],
+      "status": "active",
+      "capabilities": {
+        "supports_generation": false,
+        "supports_edit": true,
+        "supports_upscaling": false,
+        "supports_background_removal": false
+      },
+      "pricing": { "currency": "USD", "per_image": null, "per_edit": 0.1 },
+      "quality_tier": "pro",
+      "speed_tier": "slow",
+      "recommended_use_cases": ["inpainting", "object_replacement", "targeted_modification"],
+      "avoid_use_cases": ["full_scene_generation_from_scratch"],
+      "aliases": [],
+      "cost_per_edit": "$0.10",
+      "recommended_api_params": {
+        "cfg_scale": 5.0,
+        "steps": 30,
+        "aspect_ratio": "1:1",
+        "format": "webp"
+      }
+    },
+    {
+      "id": "flux-2-max-edit",
+      "name": "Flux 2 Max (Edit)",
+      "description": "Powerful editing tool using the Flux Max engine for object insertion.",
+      "task_types": ["image_edit"],
+      "status": "active",
+      "capabilities": {
+        "supports_generation": false,
+        "supports_edit": true,
+        "supports_upscaling": false,
+        "supports_background_removal": false
+      },
+      "pricing": { "currency": "USD", "per_image": null, "per_edit": 0.09 },
+      "quality_tier": "pro",
+      "speed_tier": "slow",
+      "recommended_use_cases": ["inpainting", "object_replacement", "targeted_modification"],
+      "avoid_use_cases": ["full_scene_generation_from_scratch"],
+      "aliases": [],
+      "cost_per_edit": "$0.09",
+      "recommended_api_params": {
+        "cfg_scale": 1.0,
+        "steps": 30,
+        "aspect_ratio": "1:1",
+        "format": "webp"
+      }
+    },
+    {
+      "id": "gpt-image-1-5-edit",
+      "name": "GPT Image 1.5 (Edit)",
+      "description": "Semantic-aware modification and intelligent object replacement.",
+      "task_types": ["image_edit"],
+      "status": "active",
+      "capabilities": {
+        "supports_generation": false,
+        "supports_edit": true,
+        "supports_upscaling": false,
+        "supports_background_removal": false
+      },
+      "pricing": { "currency": "USD", "per_image": null, "per_edit": 0.36 },
+      "quality_tier": "premium",
+      "speed_tier": "balanced",
+      "recommended_use_cases": ["inpainting", "object_replacement", "targeted_modification"],
+      "avoid_use_cases": ["full_scene_generation_from_scratch"],
+      "aliases": [],
+      "cost_per_edit": "$0.36",
+      "recommended_api_params": {
+        "cfg_scale": 7.0,
+        "steps": 30,
+        "aspect_ratio": "1:1",
+        "format": "webp"
+      }
+    },
+    {
+      "id": "grok-imagine-edit",
+      "name": "Grok Imagine (Edit)",
+      "description": "Creative inpainting and variation generation using the Grok engine.",
+      "task_types": ["image_edit"],
+      "status": "active",
+      "capabilities": {
+        "supports_generation": false,
+        "supports_edit": true,
+        "supports_upscaling": false,
+        "supports_background_removal": false
+      },
+      "pricing": { "currency": "USD", "per_image": null, "per_edit": 0.04 },
+      "quality_tier": "standard",
+      "speed_tier": "balanced",
+      "recommended_use_cases": ["inpainting", "object_replacement", "targeted_modification"],
+      "avoid_use_cases": ["full_scene_generation_from_scratch"],
+      "aliases": [],
+      "cost_per_edit": "$0.04",
+      "recommended_api_params": {
+        "cfg_scale": 5.0,
+        "steps": 25,
+        "aspect_ratio": "1:1",
+        "format": "webp"
+      }
+    },
+    {
+      "id": "nano-banana-2-edit",
+      "name": "Nano Banana 2 (Edit)",
+      "description": "Fast and effective object manipulation within existing images.",
+      "task_types": ["image_edit"],
+      "status": "active",
+      "capabilities": {
+        "supports_generation": false,
+        "supports_edit": true,
+        "supports_upscaling": false,
+        "supports_background_removal": false
+      },
+      "pricing": { "currency": "USD", "per_image": null, "per_edit": 0.1 },
+      "quality_tier": "pro",
+      "speed_tier": "balanced",
+      "recommended_use_cases": ["inpainting", "object_replacement", "targeted_modification"],
+      "avoid_use_cases": ["full_scene_generation_from_scratch"],
+      "aliases": [],
+      "cost_per_edit": "$0.10",
+      "recommended_api_params": {
+        "cfg_scale": 4.5,
+        "steps": 25,
+        "aspect_ratio": "1:1",
+        "format": "webp"
+      }
+    },
+    {
+      "id": "nano-banana-pro-edit",
+      "name": "Nano Banana Pro (Edit)",
+      "description": "Professional high-resolution editing for large-format images.",
+      "task_types": ["image_edit"],
+      "status": "active",
+      "capabilities": {
+        "supports_generation": false,
+        "supports_edit": true,
+        "supports_upscaling": false,
+        "supports_background_removal": false
+      },
+      "pricing": { "currency": "USD", "per_image": null, "per_edit": 0.18 },
+      "quality_tier": "premium",
+      "speed_tier": "slow",
+      "recommended_use_cases": ["inpainting", "object_replacement", "targeted_modification"],
+      "avoid_use_cases": ["full_scene_generation_from_scratch"],
+      "aliases": [],
+      "cost_per_edit": "$0.18",
+      "recommended_api_params": {
+        "cfg_scale": 5.0,
+        "steps": 30,
+        "aspect_ratio": "1:1",
+        "format": "webp"
+      }
+    },
+    {
+      "id": "seedream-v4-edit",
+      "name": "SeedreamV4.5 (Edit)",
+      "description": "Stylistic editing, texture replacement, and artistic modifications.",
+      "task_types": ["image_edit"],
+      "status": "active",
+      "capabilities": {
+        "supports_generation": false,
+        "supports_edit": true,
+        "supports_upscaling": false,
+        "supports_background_removal": false
+      },
+      "pricing": { "currency": "USD", "per_image": null, "per_edit": 0.05 },
+      "quality_tier": "standard",
+      "speed_tier": "balanced",
+      "recommended_use_cases": ["inpainting", "object_replacement", "targeted_modification"],
+      "avoid_use_cases": ["full_scene_generation_from_scratch"],
+      "aliases": [],
+      "cost_per_edit": "$0.05",
+      "recommended_api_params": {
+        "cfg_scale": 7.0,
+        "steps": 25,
+        "aspect_ratio": "1:1",
+        "format": "webp"
+      }
+    },
+    {
+      "id": "seedream-v5-lite-edit",
+      "name": "SeedreamV5 Lite (Edit)",
+      "description": "Light-weight, quick inpainting for fast-latency applications.",
+      "task_types": ["image_edit"],
+      "status": "active",
+      "capabilities": {
+        "supports_generation": false,
+        "supports_edit": true,
+        "supports_upscaling": false,
+        "supports_background_removal": false
+      },
+      "pricing": { "currency": "USD", "per_image": null, "per_edit": 0.05 },
+      "quality_tier": "standard",
+      "speed_tier": "balanced",
+      "recommended_use_cases": ["inpainting", "object_replacement", "targeted_modification"],
+      "avoid_use_cases": ["full_scene_generation_from_scratch"],
+      "aliases": [],
+      "cost_per_edit": "$0.05",
+      "recommended_api_params": {
+        "cfg_scale": 2.0,
+        "steps": 8,
+        "aspect_ratio": "1:1",
+        "format": "webp"
+      }
+    }
+  ]
+}
