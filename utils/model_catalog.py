@@ -6,8 +6,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
 
-CATALOG_SCHEMA_VERSION = "2.1"
-SUPPORTED_SCHEMA_VERSIONS = {"2.0", "2.1"}
+CATALOG_SCHEMA_VERSION = "3.0"
+SUPPORTED_SCHEMA_VERSIONS = {"2.0", "2.1", "3.0"}
 SUPPORTED_TASK_TYPES = {
     "text_to_image",
     "image_edit",

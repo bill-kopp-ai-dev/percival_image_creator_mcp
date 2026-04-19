@@ -11,10 +11,12 @@ from typing import Any
 from typing import Optional
 from urllib.parse import urlparse
 
-import requests
-from openai import OpenAI
+import httpx
+from openai import AsyncOpenAI
+from pydantic import BaseModel, Field
 from PIL import Image
 
+from utils.config import get_env_bool, get_env_int, get_env_str
 from utils.security_utils import record_security_event
 
 logger = logging.getLogger(__name__)
@@ -26,27 +28,23 @@ DEFAULT_PROVIDER_TIMEOUT_SECONDS = 90
 SUPPORTED_IMAGE_TRANSPORTS = {"auto", "openai_compat", "venice_native"}
 
 
-def _env_bool(var_name: str, default: bool) -> bool:
-    raw = os.getenv(var_name)
-    if raw is None:
-        return default
-    normalized = raw.strip().lower()
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-    return default
+class ImageStyle(BaseModel):
+    id: str
+    name: str
+    description: Optional[str] = None
 
 
-def _env_int(var_name: str, default: int, minimum: int = 1) -> int:
-    raw = os.getenv(var_name)
-    if raw is None:
-        return default
-    try:
-        value = int(raw.strip())
-    except Exception:
-        return default
-    return max(minimum, value)
+class ImagePayload(BaseModel):
+    b64_json: Optional[str] = None
+    url: Optional[str] = None
+
+
+class GenerationResponse(BaseModel):
+    data: list[ImagePayload]
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+
+
 
 
 def _parse_size_to_dimensions(size: str) -> tuple[Optional[int], Optional[int]]:
@@ -125,12 +123,12 @@ def validate_outbound_url(url: str, *, purpose: str) -> str:
         raise ValueError("Invalid URL: missing scheme or host.")
 
     if purpose == "provider":
-        allow_http = _env_bool("PERCIVAL_IMAGE_MCP_ALLOW_INSECURE_PROVIDER_URL", False)
-        allow_private = _env_bool("PERCIVAL_IMAGE_MCP_ALLOW_PRIVATE_PROVIDER_URL", False)
+        allow_http = get_env_bool("PERCIVAL_IMAGE_MCP_ALLOW_INSECURE_PROVIDER_URL", False)
+        allow_private = get_env_bool("PERCIVAL_IMAGE_MCP_ALLOW_PRIVATE_PROVIDER_URL", False)
         allowlist = _parse_host_allowlist("PERCIVAL_IMAGE_MCP_ALLOWED_PROVIDER_HOSTS")
     elif purpose == "download":
-        allow_http = _env_bool("PERCIVAL_IMAGE_MCP_ALLOW_HTTP_DOWNLOADS", False)
-        allow_private = _env_bool("PERCIVAL_IMAGE_MCP_ALLOW_PRIVATE_DOWNLOADS", False)
+        allow_http = get_env_bool("PERCIVAL_IMAGE_MCP_ALLOW_HTTP_DOWNLOADS", False)
+        allow_private = get_env_bool("PERCIVAL_IMAGE_MCP_ALLOW_PRIVATE_DOWNLOADS", False)
         allowlist = _parse_host_allowlist("PERCIVAL_IMAGE_MCP_ALLOWED_DOWNLOAD_HOSTS")
     else:
         raise ValueError(f"Unknown outbound URL purpose: {purpose}")
@@ -246,10 +244,10 @@ JARVINA_API_KEY = get_jarvina_api_key()
 JARVINA_VISION_MODEL = get_jarvina_vision_model()
 
 
-_client_instance: Optional[OpenAI] = None
+_client_instance: Optional[AsyncOpenAI] = None
 
 
-def get_jarvina_client() -> OpenAI:
+def get_jarvina_client() -> AsyncOpenAI:
     """
     Lazily initialize the provider client.
 
@@ -266,7 +264,7 @@ def get_jarvina_client() -> OpenAI:
         raise RuntimeError(msg)
 
     base_url = validate_outbound_url(get_jarvina_base_url(), purpose="provider")
-    _client_instance = OpenAI(api_key=api_key, base_url=base_url)
+    _client_instance = AsyncOpenAI(api_key=api_key, base_url=base_url)
     logger.info("Jarvina Client inicializado apontando para: %s", base_url)
     return _client_instance
 
@@ -339,7 +337,7 @@ def _normalize_style_records(payload: Any) -> list[dict[str, Any]]:
     return deduped
 
 
-def list_provider_image_styles() -> list[dict[str, Any]]:
+async def list_provider_image_styles() -> list[ImageStyle]:
     """
     Fetch available image style presets from provider (`GET /image/styles`).
     """
@@ -351,30 +349,33 @@ def list_provider_image_styles() -> list[dict[str, Any]]:
     endpoint_url = _build_provider_endpoint(base_url, "image/styles")
     validate_outbound_url(endpoint_url, purpose="provider")
 
-    timeout = _env_int("PERCIVAL_IMAGE_MCP_PROVIDER_TIMEOUT_SECONDS", DEFAULT_PROVIDER_TIMEOUT_SECONDS)
+    timeout = get_env_int("PERCIVAL_IMAGE_MCP_PROVIDER_TIMEOUT_SECONDS", DEFAULT_PROVIDER_TIMEOUT_SECONDS)
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    response = requests.get(endpoint_url, headers=headers, timeout=timeout)
-    try:
-        response.raise_for_status()
-    except Exception as exc:
-        response_text = (getattr(response, "text", "") or "").strip()
-        details = f"{exc}"
-        if response_text:
-            details = f"{details}; body={response_text[:400]}"
-        raise RuntimeError(f"Provider styles request failed: {details}") from exc
 
-    try:
-        payload = response.json()
-    except Exception as exc:
-        raise RuntimeError("Provider styles endpoint returned non-JSON response.") from exc
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.get(endpoint_url, headers=headers)
+        try:
+            response.raise_for_status()
+        except Exception as exc:
+            response_text = response.text.strip()
+            details = f"{exc}"
+            if response_text:
+                details = f"{details}; body={response_text[:400]}"
+            raise RuntimeError(f"Provider styles request failed: {details}") from exc
 
-    styles = _normalize_style_records(payload)
-    if not styles:
+        try:
+            payload = response.json()
+        except Exception as exc:
+            raise RuntimeError("Provider styles endpoint returned non-JSON response.") from exc
+
+    styles_raw = _normalize_style_records(payload)
+    if not styles_raw:
         raise RuntimeError("Provider styles response did not contain style records.")
-    return styles
+
+    return [ImageStyle(**s) for s in styles_raw]
 
 
-def _normalize_native_generation_response(payload: Any) -> Any:
+def _normalize_native_generation_response(payload: Any) -> GenerationResponse:
     if not isinstance(payload, dict):
         raise ValueError("Native provider response must be a JSON object.")
 
@@ -387,13 +388,13 @@ def _normalize_native_generation_response(payload: Any) -> Any:
     elif payload.get("image") is not None:
         raw_items = [payload["image"]]
 
-    normalized_items: list[Any] = []
+    normalized_items: list[ImagePayload] = []
     for item in raw_items:
         if isinstance(item, dict):
             b64_value = item.get("b64_json") or item.get("base64") or item.get("image_base64") or item.get("image")
             url_value = item.get("url")
             normalized_items.append(
-                SimpleNamespace(
+                ImagePayload(
                     b64_json=b64_value if isinstance(b64_value, str) else None,
                     url=url_value if isinstance(url_value, str) else None,
                 )
@@ -403,15 +404,15 @@ def _normalize_native_generation_response(payload: Any) -> Any:
         if isinstance(item, str):
             stripped = item.strip()
             if stripped.startswith("http://") or stripped.startswith("https://"):
-                normalized_items.append(SimpleNamespace(b64_json=None, url=stripped))
+                normalized_items.append(ImagePayload(b64_json=None, url=stripped))
             else:
-                normalized_items.append(SimpleNamespace(b64_json=stripped, url=None))
+                normalized_items.append(ImagePayload(b64_json=stripped, url=None))
             continue
 
     if not normalized_items:
         raise ValueError("Native provider response does not include image payloads.")
 
-    return SimpleNamespace(data=normalized_items, raw=payload)
+    return GenerationResponse(data=normalized_items, raw=payload)
 
 
 class _NativeUnrecognizedKeysError(RuntimeError):
@@ -459,7 +460,7 @@ def _get_native_retry_limit() -> int:
         return 1
 
 
-def _generate_images_venice_native(openai_request: dict[str, Any]) -> tuple[Any, list[str]]:
+async def _generate_images_venice_native(openai_request: dict[str, Any]) -> tuple[GenerationResponse, list[str]]:
     api_key = get_jarvina_api_key()
     if not api_key:
         raise RuntimeError("Missing API key for native Venice transport.")
@@ -468,7 +469,7 @@ def _generate_images_venice_native(openai_request: dict[str, Any]) -> tuple[Any,
     endpoint_url = _build_provider_endpoint(base_url, "image/generate")
     validate_outbound_url(endpoint_url, purpose="provider")
 
-    timeout = _env_int("PERCIVAL_IMAGE_MCP_PROVIDER_TIMEOUT_SECONDS", DEFAULT_PROVIDER_TIMEOUT_SECONDS)
+    timeout = get_env_int("PERCIVAL_IMAGE_MCP_PROVIDER_TIMEOUT_SECONDS", DEFAULT_PROVIDER_TIMEOUT_SECONDS)
     payload: dict[str, Any] = {
         "model": openai_request.get("model"),
         "prompt": openai_request.get("prompt"),
@@ -496,55 +497,56 @@ def _generate_images_venice_native(openai_request: dict[str, Any]) -> tuple[Any,
     dropped_keys: list[str] = []
     immutable_keys = {"model", "prompt"}
 
-    for attempt in range(retry_limit + 1):
-        response = requests.post(endpoint_url, json=payload, headers=headers, timeout=timeout)
-        try:
-            response.raise_for_status()
-        except Exception as exc:
-            response_text = (getattr(response, "text", "") or "").strip()
-            details = f"{exc}"
-            response_json = None
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        for attempt in range(retry_limit + 1):
+            response = await client.post(endpoint_url, json=payload, headers=headers)
             try:
-                response_json = response.json()
-            except Exception:
+                response.raise_for_status()
+            except Exception as exc:
+                response_text = response.text.strip()
+                details = f"{exc}"
                 response_json = None
+                try:
+                    response_json = response.json()
+                except Exception:
+                    response_json = None
 
-            unrecognized_keys = _extract_unrecognized_keys_from_error_payload(response_json)
-            retryable_keys = [key for key in unrecognized_keys if key in payload and key not in immutable_keys]
-            can_retry = bool(retryable_keys) and attempt < retry_limit
-            if can_retry:
-                for key in retryable_keys:
-                    payload.pop(key, None)
-                    if key not in dropped_keys:
-                        dropped_keys.append(key)
-                logger.warning(
-                    "Native Venice transport rejected keys %s (attempt %s/%s). Retrying without them.",
-                    retryable_keys,
-                    attempt + 1,
-                    retry_limit + 1,
-                )
-                continue
+                unrecognized_keys = _extract_unrecognized_keys_from_error_payload(response_json)
+                retryable_keys = [key for key in unrecognized_keys if key in payload and key not in immutable_keys]
+                can_retry = bool(retryable_keys) and attempt < retry_limit
+                if can_retry:
+                    for key in retryable_keys:
+                        payload.pop(key, None)
+                        if key not in dropped_keys:
+                            dropped_keys.append(key)
+                    logger.warning(
+                        "Native Venice transport rejected keys %s (attempt %s/%s). Retrying without them.",
+                        retryable_keys,
+                        attempt + 1,
+                        retry_limit + 1,
+                    )
+                    continue
 
-            if response_text:
-                details = f"{details}; body={response_text[:400]}"
-            if unrecognized_keys:
-                raise _NativeUnrecognizedKeysError(
-                    unrecognized_keys,
-                    f"Native Venice generation request failed: {details}",
-                ) from exc
-            raise RuntimeError(f"Native Venice generation request failed: {details}") from exc
+                if response_text:
+                    details = f"{details}; body={response_text[:400]}"
+                if unrecognized_keys:
+                    raise _NativeUnrecognizedKeysError(
+                        unrecognized_keys,
+                        f"Native Venice generation request failed: {details}",
+                    ) from exc
+                raise RuntimeError(f"Native Venice generation request failed: {details}") from exc
 
-        try:
-            payload_json = response.json()
-        except Exception as exc:
-            raise RuntimeError("Native Venice generation returned non-JSON response.") from exc
+            try:
+                payload_json = response.json()
+            except Exception as exc:
+                raise RuntimeError("Native Venice generation returned non-JSON response.") from exc
 
-        return _normalize_native_generation_response(payload_json), dropped_keys
+            return _normalize_native_generation_response(payload_json), dropped_keys
 
     raise RuntimeError("Native Venice generation request exhausted retries.")
 
 
-def generate_images_with_transport(
+async def generate_images_with_transport(
     openai_request: dict[str, Any],
     *,
     openai_client: Any = None,
@@ -561,7 +563,7 @@ def generate_images_with_transport(
     mode = requested_mode
     if mode == "auto":
         mode = "venice_native" if _is_venice_base_url(base_url) else "openai_compat"
-    fallback_enabled = _env_bool("PERCIVAL_IMAGE_MCP_IMAGE_TRANSPORT_FALLBACK", True)
+    fallback_enabled = get_env_bool("PERCIVAL_IMAGE_MCP_IMAGE_TRANSPORT_FALLBACK", True)
     effective_client = openai_client or jarvina_client
 
     if mode == "openai_compat":
@@ -570,7 +572,7 @@ def generate_images_with_transport(
             openai_request,
             drop_extra_body=should_drop_extra_body,
         )
-        response = effective_client.images.generate(**request_payload)
+        response = await effective_client.images.generate(**request_payload)
         return response, {
             "transport_requested": requested_mode,
             "transport_used": "openai_compat",
@@ -580,7 +582,7 @@ def generate_images_with_transport(
 
     if mode == "venice_native":
         try:
-            response, dropped_keys = _generate_images_venice_native(openai_request)
+            response, dropped_keys = await _generate_images_venice_native(openai_request)
             return response, {
                 "transport_requested": requested_mode,
                 "transport_used": "venice_native",
@@ -602,7 +604,7 @@ def generate_images_with_transport(
                 openai_request,
                 drop_extra_body=_is_venice_base_url(base_url),
             )
-            response = effective_client.images.generate(**request_payload)
+            response = await effective_client.images.generate(**request_payload)
             return response, {
                 "transport_requested": requested_mode,
                 "transport_used": "openai_compat",
@@ -612,7 +614,7 @@ def generate_images_with_transport(
             }
 
     # Defensive fallback for unexpected values.
-    response = effective_client.images.generate(**openai_request)
+    response = await effective_client.images.generate(**openai_request)
     return response, {
         "transport_requested": requested_mode,
         "transport_used": "openai_compat",
@@ -647,70 +649,74 @@ def get_image_info(image_path: Path) -> dict:
         return {"error": str(exc)}
 
 
-def save_base64_image(base64_data: str, output_path: Path, image_format: str = "PNG") -> bool:
+async def save_base64_image(base64_data: str, output_path: Path, image_format: str = "PNG") -> bool:
     """Save base64 encoded image data to file."""
     try:
         image_data = base64.b64decode(base64_data)
+        # Note: PIL.Image.save is blocking. 
+        # In a high-traffic scenario, this might need thread wrapping.
         with Image.open(io.BytesIO(image_data)) as img:
             img.save(output_path, format=image_format)
         return True
     except Exception as exc:
-        print(f"Error saving image: {exc}")
+        logger.error("Error saving image: %s", exc)
         return False
 
 
-def download_image_from_url(url: str, output_path: Path, timeout: int = 30) -> bool:
-    """Download image from URL and save to file."""
+async def download_image_from_url(url: str, output_path: Path, timeout: int = 30) -> bool:
+    """Download image from URL and save to file using httpx."""
     try:
-        max_bytes = _env_int("PERCIVAL_IMAGE_MCP_DOWNLOAD_MAX_BYTES", DEFAULT_DOWNLOAD_MAX_BYTES)
+        max_bytes = get_env_int("PERCIVAL_IMAGE_MCP_DOWNLOAD_MAX_BYTES", DEFAULT_DOWNLOAD_MAX_BYTES)
         validated_url = validate_outbound_url(url, purpose="download")
 
-        response = requests.get(validated_url, timeout=timeout, stream=True)
-        response.raise_for_status()
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            async with client.stream("GET", validated_url) as response:
+                response.raise_for_status()
 
-        # Validate final redirect destination if provider redirected.
-        final_url = response.url or validated_url
-        validate_outbound_url(final_url, purpose="download")
+                # Validate final redirect destination if provider redirected.
+                final_url = str(response.url)
+                validate_outbound_url(final_url, purpose="download")
 
-        content_length_raw = response.headers.get("Content-Length")
-        if content_length_raw:
-            try:
-                content_length = int(content_length_raw)
-            except Exception:
-                content_length = None
-            else:
-                if content_length > max_bytes:
-                    record_security_event(
-                        "upstream_download_blocked",
-                        {
-                            "reason": "content_length_exceeded",
-                            "max_bytes": max_bytes,
-                            "content_length": content_length,
-                        },
-                    )
-                    raise ValueError(
-                        f"Download blocked: content-length {content_length} exceeds limit {max_bytes}."
-                    )
+                content_length_raw = response.headers.get("Content-Length")
+                if content_length_raw:
+                    try:
+                        content_length = int(content_length_raw)
+                    except Exception:
+                        content_length = None
+                    else:
+                        if content_length > max_bytes:
+                            record_security_event(
+                                "upstream_download_blocked",
+                                {
+                                    "reason": "content_length_exceeded",
+                                    "max_bytes": max_bytes,
+                                    "content_length": content_length,
+                                },
+                            )
+                            raise ValueError(
+                                f"Download blocked: content-length {content_length} exceeds limit {max_bytes}."
+                            )
 
-        bytes_written = 0
-        with open(output_path, "wb") as file_handle:
-            for chunk in response.iter_content(chunk_size=8192):
-                if not chunk:
-                    continue
-                bytes_written += len(chunk)
-                if bytes_written > max_bytes:
-                    record_security_event(
-                        "upstream_download_blocked",
-                        {
-                            "reason": "stream_size_exceeded",
-                            "max_bytes": max_bytes,
-                            "bytes_written": bytes_written,
-                        },
-                    )
-                    raise ValueError(
-                        f"Download blocked: stream exceeded limit {max_bytes} bytes."
-                    )
-                file_handle.write(chunk)
+                bytes_written = 0
+                with open(output_path, "wb") as file_handle:
+                    async for chunk in response.aiter_bytes(chunk_size=8192):
+                        if not chunk:
+                            continue
+                        bytes_written += len(chunk)
+                        if bytes_written > max_bytes:
+                            record_security_event(
+                                "upstream_download_blocked",
+                                {
+                                    "reason": "stream_size_exceeded",
+                                    "max_bytes": max_bytes,
+                                    "bytes_written": bytes_written,
+                                },
+                            )
+                            raise ValueError(
+                                f"Download blocked: stream exceeded limit {max_bytes} bytes."
+                            )
+                        file_handle.write(chunk)
+                
         record_security_event(
             "upstream_download_success",
             {"bytes_written": bytes_written, "max_bytes": max_bytes},

@@ -16,9 +16,12 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 import uvicorn
 
-# Import tools for registration side effects.
 import tools.image_description_tools  # noqa: F401
 import tools.image_generation_tools  # noqa: F401
+import logging
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
 DEFAULT_AUTH_TOKEN_ENV_VAR = "PERCIVAL_IMAGE_MCP_AUTH_TOKEN"
 
@@ -112,8 +115,8 @@ def _validate_http_runtime_security(
             "loopback_http_without_auth",
             {"mode": mode, "host": host},
         )
-        print(
-            "[security-warning] HTTP mode on loopback without authentication token. "
+        logger.warning(
+            "HTTP mode on loopback without authentication token. "
             "Use only for local development."
         )
 
@@ -260,15 +263,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         stateless_http=args.stateless_http,
         mount_path=args.mount_path,
     )
-    print(
-        "[mcp-startup] "
-        f"server={runtime_info['server']} "
-        f"mode={args.mode} "
-        f"host={runtime_info['host']} "
-        f"port={runtime_info['port']} "
-        f"log_level={runtime_info['log_level']} "
-        f"contract={CONTRACT_VERSION} "
-        f"auth_enabled={bool(auth_token)}"
+    logger.info(
+        f"[mcp-startup] server={runtime_info['server']} "
+        f"mode={args.mode} host={runtime_info['host']} "
+        f"port={runtime_info['port']} log_level={runtime_info['log_level']} "
+        f"contract={CONTRACT_VERSION} auth_enabled={bool(auth_token)}"
     )
 
     if args.mode == "stdio":

@@ -71,7 +71,7 @@ def build_nanobot_profile() -> dict[str, Any]:
             "strict_model_check": True,
             "provider_model_cache_ttl_seconds": 300,
             "image_edit_max_n": 10,
-            "default_output_dir": "/home/bill-kopp/Pictures",
+            "default_output_dir": "~/Pictures",
         },
         "generation_parameter_contract": {
             "precedence": [

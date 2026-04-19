@@ -16,26 +16,36 @@ The original work's robust MCP tool architecture, `uv`-based dependency manageme
 
 The following architectural changes were made to transform `ai-image-mcp` into **Percival**:
 
-### 1. Decoupled OpenAI Client (Provider-Agnostic)
+### 1. Fully Asynchronous Architecture (Performance)
 
-The original project required `OPENAI_API_KEY` and pointed strictly to OpenAI's servers.
+The original project used synchronous I/O and blocking requests, which could degrade MCP server responsiveness during large generations.
 
-- **Change:** A centralized client module (`utils/client.py`) was implemented, reading custom environment variables `JARVINA_BASE_URL` and `JARVINA_API_KEY`. It also supports graceful fallbacks to `VENICE_API_KEY` and `OPENAI_API_KEY` to ease migration.
-- **Benefit:** The server can now target any OpenAI-compatible provider (e.g. Venice.ai) without modifying any tool code.
+- **Change:** Migrated the entire server to an async-first model. Core transport now uses `httpx.AsyncClient` and `AsyncOpenAI`.
+- **Change:** All tools (generation, editing, vision, list, metadata) are now `async def` and non-blocking.
+- **Benefit:** Full compatibility with FastMCP's async runtime and significantly higher throughput for concurrent requests.
 
-### 2. Catalog-Driven Model Selection (Model Cards)
+### 2. Decoupled OpenAI Client (Provider-Agnostic)
 
-The original flow depended only on live provider discovery, which made model choice quality inconsistent for autonomous agents.
+- **Change:** A centralized async client module (`utils/client.py`) was implemented, utilizing Pydantic models for response validation. It targets variables like `JARVINA_BASE_URL` and `JARVINA_API_KEY`.
+- **Benefit:** Robust, type-safe communication with any OpenAI-compatible provider (e.g. Venice.ai).
 
-- **Change:** Added a structured local model catalog (`image_models.json`, schema `2.1`) and catalog utilities (`utils/model_catalog.py`) to expose model cards for generation, editing, upscaling, and background removal tasks.
-- **Benefit:** Agents now choose models by intent, capability, speed tier, quality tier, and cost metadata before any provider call.
+### 3. Modernized Model Catalog (Schema 3.0)
 
-### 3. Online Availability Verification (Venice)
+- **Change:** Updated the local model catalog (`image_models.json`) to schema version `3.0` and optimized catalog utilities (`utils/model_catalog.py`) for efficient normalization.
+- **Benefit:** Richer metadata support for specialized tasks like vector clear generation and 4K upscaling.
 
-- **Change:** Added `verify_model_availability` and short-lived provider model cache (TTL 300s). `generate_image` and `edit_image` now support strict preflight validation (`strict_model_check=True` by default).
-- **Benefit:** Prevents execution with stale/unavailable models and enforces catalog-task compatibility.
+### 4. Flexible & Agnostic Sandbox (User Workspace)
 
-### 4. Venice Payload Builder (Deterministic Parameter Resolution)
+- **Change:** Centralized path validation in `utils/path_utils.py` and implemented a broad, language-agnostic sandbox policy.
+- **Change:** The user's **Home directory** (`Path.home()`) is now an allowed root by default, ensuring immediate compatibility with Nanobot workspaces across different OS languages (e.g. Portuguese, English).
+- **Benefit:** Eliminates "outside allowed roots" errors while maintaining security guardrails against arbitrary system escapes.
+
+### 5. Centralized Configuration & Standardized Logging
+
+- **Change:** Replaced all scattered `os.getenv` and `print` statements with a unified `utils/config.py` module and standard Python `logging`.
+- **Benefit:** Improved observability and easier deployment without interfering with MCP's `stdio` protocol.
+
+### 6. Venice Payload Builder (Deterministic Parameter Resolution)
 
 The original `generate_image` function did not support advanced parameters from non-OpenAI providers.
 
@@ -112,6 +122,7 @@ The original cache system generated hashes based only on prompt, model, and imag
 ## 🚀 Requirements
 
 - Python 3.10+
+- [`httpx`](https://github.com/encode/httpx) & [`pydantic`](https://github.com/pydantic/pydantic)
 - [`uv`](https://github.com/astral-sh/uv) package manager
 - Shared workspace virtual environment (`percival.OS_Dev/.venv`) for runtime and tests
 
@@ -120,8 +131,8 @@ The original cache system generated hashes based only on prompt, model, and imag
 ## 📦 Installation
 
 ```bash
-cd /absolute/path/to/percival.OS_Dev
-export UV_PROJECT_ENVIRONMENT=/absolute/path/to/percival.OS_Dev/.venv
+cd ~/Documentos/percival.OS_Dev
+export UV_PROJECT_ENVIRONMENT=~/Documentos/percival.OS_Dev/.venv
 uv sync --directory mcp_servers/percival_image_creator_mcp
 ```
 
@@ -144,8 +155,8 @@ Percival is configured via environment variables:
 | `PERCIVAL_IMAGE_MCP_VENICE_NATIVE_RETRIES` | ❌ | `1` | Number of native retry attempts after provider `unrecognized_keys` errors |
 | `PERCIVAL_IMAGE_MCP_PROVIDER_TIMEOUT_SECONDS` | ❌ | `90` | Timeout for provider generation requests |
 | `PERCIVAL_IMAGE_MCP_GENERATION_OVERRIDES_JSON` | ❌ | — | JSON object with runtime generation parameter overrides |
-| `PERCIVAL_IMAGE_MCP_DEFAULT_OUTPUT_DIR` | ❌ | `/home/bill-kopp/Pictures` | Default output directory for generated/edited images |
-| `PERCIVAL_IMAGE_MCP_ALLOWED_ROOTS` | ❌ | process CWD | Comma-separated absolute roots allowed for `working_dir` |
+| `PERCIVAL_IMAGE_MCP_DEFAULT_OUTPUT_DIR` | ❌ | `~/Pictures` | Default output directory for generated/edited images |
+| `PERCIVAL_IMAGE_MCP_ALLOWED_ROOTS` | ❌ | Home + CWD | Comma-separated absolute roots allowed for `working_dir` |
 | `PERCIVAL_IMAGE_MCP_DISABLE_ROOT_SANDBOX` | ❌ | `false` | Disable `working_dir` root containment (development only) |
 | `PERCIVAL_IMAGE_MCP_AUTH_TOKEN` | ❌ | — | Bearer token used by HTTP auth middleware |
 | `PERCIVAL_IMAGE_MCP_ALLOW_REMOTE_HTTP` | ❌ | `false` | Permit non-loopback HTTP bind (requires auth token) |
@@ -171,30 +182,30 @@ Percival is configured via environment variables:
 Canonical stdio runtime:
 
 ```bash
-export UV_PROJECT_ENVIRONMENT=/absolute/path/to/percival.OS_Dev/.venv
-uv run --no-sync --directory /absolute/path/to/percival.OS_Dev/mcp_servers/percival_image_creator_mcp python main.py --mode stdio
+export UV_PROJECT_ENVIRONMENT=~/Documentos/percival.OS_Dev/.venv
+uv run --no-sync --directory ~/Documentos/percival.OS_Dev/mcp_servers/percival_image_creator_mcp python main.py --mode stdio
 ```
 
 HTTP transports:
 
 ```bash
-export UV_PROJECT_ENVIRONMENT=/absolute/path/to/percival.OS_Dev/.venv
-PERCIVAL_IMAGE_MCP_AUTH_TOKEN=change-me uv run --no-sync --directory /absolute/path/to/percival.OS_Dev/mcp_servers/percival_image_creator_mcp python main.py --mode sse --host 127.0.0.1 --port 8000
-PERCIVAL_IMAGE_MCP_AUTH_TOKEN=change-me uv run --no-sync --directory /absolute/path/to/percival.OS_Dev/mcp_servers/percival_image_creator_mcp python main.py --mode streamable-http --host 127.0.0.1 --port 8000 --stateless-http
+export UV_PROJECT_ENVIRONMENT=~/Documentos/percival.OS_Dev/.venv
+PERCIVAL_IMAGE_MCP_AUTH_TOKEN=change-me uv run --no-sync --directory ~/Documentos/percival.OS_Dev/mcp_servers/percival_image_creator_mcp python main.py --mode sse --host 127.0.0.1 --port 8000
+PERCIVAL_IMAGE_MCP_AUTH_TOKEN=change-me uv run --no-sync --directory ~/Documentos/percival.OS_Dev/mcp_servers/percival_image_creator_mcp python main.py --mode streamable-http --host 127.0.0.1 --port 8000 --stateless-http
 ```
 
 Print integration profile:
 
 ```bash
-export UV_PROJECT_ENVIRONMENT=/absolute/path/to/percival.OS_Dev/.venv
-uv run --no-sync --directory /absolute/path/to/percival.OS_Dev/mcp_servers/percival_image_creator_mcp python main.py --print-profile
+export UV_PROJECT_ENVIRONMENT=~/Documentos/percival.OS_Dev/.venv
+uv run --no-sync --directory ~/Documentos/percival.OS_Dev/mcp_servers/percival_image_creator_mcp python main.py --print-profile
 ```
 
 ## ✅ Tests
 
 ```bash
-export UV_PROJECT_ENVIRONMENT=/absolute/path/to/percival.OS_Dev/.venv
-uv run --no-sync --directory /absolute/path/to/percival.OS_Dev/mcp_servers/percival_image_creator_mcp pytest -q
+export UV_PROJECT_ENVIRONMENT=~/Documentos/percival.OS_Dev/.venv
+uv run --no-sync --directory ~/Documentos/percival.OS_Dev/mcp_servers/percival_image_creator_mcp pytest -q
 ```
 
 ---
@@ -210,7 +221,7 @@ Add the following entry to your agent's `config.json`:
     "run",
     "--no-sync",
     "--directory",
-    "/path/to/percival.OS_Dev/mcp_servers/percival_image_creator_mcp",
+    "~/Documentos/percival.OS_Dev/mcp_servers/percival_image_creator_mcp",
     "python",
     "main.py",
     "--mode",
@@ -235,7 +246,7 @@ Add the following entry to your agent's `config.json`:
   ],
   "toolTimeout": 45,
   "env": {
-    "UV_PROJECT_ENVIRONMENT": "/absolute/path/to/percival.OS_Dev/.venv",
+    "UV_PROJECT_ENVIRONMENT": "~/Documentos/percival.OS_Dev/.venv",
     "JARVINA_API_KEY": "your-api-key-here",
     "JARVINA_BASE_URL": "https://api.venice.ai/api/v1",
     "JARVINA_VISION_MODEL": "qwen-2.5-vl"

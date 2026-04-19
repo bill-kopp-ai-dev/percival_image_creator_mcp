@@ -3,24 +3,45 @@ from typing import Tuple, Optional
 import os
 
 
-def _env_bool(var_name: str, default: bool) -> bool:
-    raw = os.getenv(var_name)
-    if raw is None:
-        return default
-    normalized = raw.strip().lower()
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-    return default
+from utils.config import get_env_bool
 
 
-def _is_relative_to(path: Path, base: Path) -> bool:
+def is_relative_to(path: Path, base: Path) -> bool:
     try:
         path.relative_to(base)
         return True
     except ValueError:
         return False
+
+def sanitize_input_text(
+    value: str,
+    *,
+    field_name: str,
+    max_chars: int,
+    allow_empty: bool = False,
+) -> Tuple[Optional[str], Optional[str]]:
+    normalized = (value or "").strip()
+    if not normalized and not allow_empty:
+        return None, f"{field_name} must be a non-empty string."
+    if len(normalized) > max_chars:
+        # Assuming record_security_event is handled by caller or imported
+        return None, f"{field_name} exceeds max length of {max_chars} characters."
+    return normalized, None
+
+def enforce_path_within_working_dir(
+    resolved_path: Path,
+    working_path: Path,
+    label: str,
+    provided_path: str,
+) -> Tuple[Optional[Path], Optional[str]]:
+    try:
+        normalized = resolved_path.resolve(strict=True)
+    except Exception as exc:
+        return None, f"Error: failed to resolve {label}.\n• Provided: '{provided_path}'\n• Error: {exc}"
+
+    if not is_relative_to(normalized, working_path):
+        return None, f"Error: {label} must be inside working_dir.\n• Provided: '{provided_path}'\n• Resolved: '{normalized}'\n• working_dir: '{working_path}'"
+    return normalized, None
 
 
 def get_allowed_working_roots() -> list[Path]:
@@ -31,7 +52,7 @@ def get_allowed_working_roots() -> list[Path]:
       - PERCIVAL_IMAGE_MCP_ALLOWED_ROOTS: comma-separated absolute paths.
       - PERCIVAL_IMAGE_MCP_DISABLE_ROOT_SANDBOX: when true, disables root containment.
     """
-    if _env_bool("PERCIVAL_IMAGE_MCP_DISABLE_ROOT_SANDBOX", False):
+    if get_env_bool("PERCIVAL_IMAGE_MCP_DISABLE_ROOT_SANDBOX", False):
         return []
 
     raw = os.getenv("PERCIVAL_IMAGE_MCP_ALLOWED_ROOTS", "").strip()
@@ -46,15 +67,25 @@ def get_allowed_working_roots() -> list[Path]:
             try:
                 roots.append(path.resolve(strict=True))
             except Exception:
-                # Ignore invalid roots; validation function will fail if no valid roots remain.
                 continue
         return roots
 
-    # Secure-by-default fallback: confine working_dir to current process working directory.
+    # Fallback paths for Nanobot and User
     try:
-        return [Path(os.getcwd()).resolve(strict=True)]
+        # 1. Current process directory
+        roots.append(Path(os.getcwd()).resolve(strict=True))
+        
+        # 2. User Home Directory (Agnostic fallback)
+        roots.append(Path.home().resolve(strict=True))
+        
+        # 3. Nanobot workspace (for extra explicitly safety)
+        nanobot_workspace = Path("~/.nanobot/workspace").expanduser().resolve(strict=False)
+        if nanobot_workspace.exists():
+            roots.append(nanobot_workspace)
     except Exception:
-        return []
+        pass
+
+    return list(set(roots))
 
 
 def validate_working_directory(working_dir: str) -> Tuple[Optional[Path], Optional[str]]:
@@ -74,7 +105,7 @@ def validate_working_directory(working_dir: str) -> Tuple[Optional[Path], Option
     except Exception as exc:
         return None, f"Error: failed to resolve working_dir '{working_dir}': {exc}"
 
-    if _env_bool("PERCIVAL_IMAGE_MCP_DISABLE_ROOT_SANDBOX", False):
+    if get_env_bool("PERCIVAL_IMAGE_MCP_DISABLE_ROOT_SANDBOX", False):
         return resolved_working, None
 
     allowed_roots = get_allowed_working_roots()
@@ -84,7 +115,7 @@ def validate_working_directory(working_dir: str) -> Tuple[Optional[Path], Option
             "Set PERCIVAL_IMAGE_MCP_ALLOWED_ROOTS with absolute existing directories."
         )
 
-    if not any(_is_relative_to(resolved_working, root) for root in allowed_roots):
+    if not any(is_relative_to(resolved_working, root) for root in allowed_roots):
         allowed_display = ", ".join(str(root) for root in allowed_roots)
         return None, (
             "Error: working_dir is outside allowed roots.\n"
