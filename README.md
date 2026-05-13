@@ -19,29 +19,31 @@ Like all components of `percival.OS`, this MCP server strictly follows our core 
 - **Privacy & Flexibility**: You can choose your preferred image generation provider, maintaining sovereignty over your keys and data.
 - **Data Sovereignty**: Generated and analyzed images are stored locally in your infrastructure.
 - **Hardened Security**: We implement a strict sandbox for working directories, prompt-injection protection in vision metadata, and real-time security telemetry.
-- **Transparency**: Based on the `ai-image-mcp` project by Kareem Aly, but extensively refactored to be asynchronous, agnostic, and secure.
 
 ---
 
 ## 🚀 Features & Tools
 
-### Image Generation
-- `image_generate`: Generate an image from a text prompt.
-- `image_edit`: Edit an existing image using image-edit capable models.
-- `image_upscale`: Upscale an image to higher resolution.
-- `image_list_models`: List available models and their capabilities.
-- `image_recommend_model`: Rank best-fit models for a specific task.
+### Image Generation & Modification
+- `image_generate`: Generate high-quality images from text prompts (Default: `flux-2-pro`).
+- `image_edit`: Modify existing images using specialized models (`qwen-edit`, `nano-banana-2-edit`).
+- `image_upscale`: Increase image resolution using local or cloud-based upscalers.
+- `image_list_models`: List the curated catalog of verified models and their costs.
+- `image_recommend_model`: Get an agentic recommendation of the best model for a specific intent.
+- `image_verify_model`: Verify if a specific model ID is available and active.
 
-### Image Analysis (Vision)
-- `image_describe`: Generate a detailed description of an image.
-- `image_analyze`: Targeted analysis by type (objects, text, colors, etc.).
-- `image_compare`: Compare two images and highlight differences.
-- `image_get_metadata`: Get technical metadata (EXIF, dimensions) locally.
+### Image Analysis & Metadata
+- `image_describe`: Generate detailed, structured descriptions using Vision LLMs.
+- `image_analyze_content`: Targeted analysis (object detection, OCR, color palette).
+- `image_compare`: Pixel-level and semantic comparison between two images.
+- `image_get_metadata`: Extract technical metadata (dimensions, EXIF, prompt history) locally.
+- `image_list_recent`: List recently generated images in the working directory.
 
-### Management & System
-- `image_get_status`: Return server operational status.
-- `image_list_recent`: List recently generated images.
-- `image_get_security_metrics`: Inspect in-memory security counters/events.
+### Observability & Security
+- `image_get_status`: Real-time security metrics and event counters.
+- `image_get_system_info`: Detailed audit of runtime security posture and environment limits.
+- `image_get_contract_info`: Machine-readable integration profile for Nanobot orchestration.
+- `image_clear_status`: Reset security metrics for a new diagnostic window.
 
 ---
 
@@ -78,14 +80,14 @@ Add the following configuration to your `~/.nanobot/config.json`:
 ---
 
 ## 🛠️ Development & Testing
-This project uses `uv` for dependency management in the shared environment.
+This project uses `uv` for dependency management.
 
 ```bash
 # Manual execution in stdio
-uv run --no-sync --directory ./mcp_servers/percival_image_creator_mcp python main.py --mode stdio
+uv run python main.py --mode stdio
 
-# Run tests
-uv run --no-sync --directory ./mcp_servers/percival_image_creator_mcp pytest -q
+# Validation
+python3 -m py_compile tools/image_generation_tools.py
 ```
 
 ---

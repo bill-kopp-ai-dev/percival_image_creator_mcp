@@ -222,6 +222,32 @@
       "recommended_api_params": { "cfg_scale": 1.0, "steps": 30, "aspect_ratio": "1:1", "format": "webp" }
     },
     {
+      "id": "qwen-edit",
+      "name": "Qwen Edit",
+      "description": "High-accuracy image editing and inpainting based on Qwen architecture.",
+      "task_types": ["image_edit"],
+      "status": "active",
+      "pricing": { "currency": "USD", "per_image": null, "per_edit": 0.05 },
+      "quality_tier": "standard",
+      "speed_tier": "balanced",
+      "recommended_use_cases": ["inpainting", "object_replacement", "text_rendering_edits"],
+      "avoid_use_cases": ["full_generation_from_scratch"],
+      "recommended_api_params": { "cfg_scale": 5.0, "steps": 25, "format": "webp" }
+    },
+    {
+      "id": "nano-banana-2-edit",
+      "name": "Nano Banana 2 Edit",
+      "description": "Premium quality editing for high-resolution assets and complex compositions.",
+      "task_types": ["image_edit"],
+      "status": "active",
+      "pricing": { "currency": "USD", "per_image": null, "per_edit": 0.15 },
+      "quality_tier": "premium",
+      "speed_tier": "slow",
+      "recommended_use_cases": ["high_res_editing", "complex_composition_changes", "professional_vfx_tasks"],
+      "avoid_use_cases": ["simple_cropping", "fast_low_quality_drafts"],
+      "recommended_api_params": { "cfg_scale": 7.0, "steps": 30, "format": "webp" }
+    },
+    {
       "id": "background-remover",
       "name": "Background Remover",
       "description": "Utility model designed to accurately isolate subjects and remove backgrounds.",

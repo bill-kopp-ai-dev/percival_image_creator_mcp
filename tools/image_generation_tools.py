@@ -1,3 +1,4 @@
+import os
 import json
 import inspect
 import time
@@ -10,7 +11,7 @@ from typing import Any, Optional
 from uuid import uuid4
 
 from server import mcp
-from utils.config import get_env_int, get_env_str
+from utils.config import get_env_int, get_env_str, get_env_bool
 from utils.client import (
     jarvina_client as client,
     generate_images_with_transport,
@@ -30,17 +31,21 @@ from utils.model_catalog import (
 from utils.nanobot_profile import (
     CONTRACT_VERSION,
     SERVER_NAME,
+    build_nanobot_profile,
 )
 from utils.path_utils import (
     validate_image_path, 
     validate_working_directory,
     sanitize_input_text,
-    is_relative_to
+    is_relative_to,
+    get_allowed_working_roots
 )
 from utils.security_utils import (
     redact_sensitive_structure,
     redact_sensitive_text,
     record_security_event,
+    get_security_metrics_snapshot,
+    clear_security_metrics as clear_security_metrics_util
 )
 from utils.venice_image_payload import (
     build_venice_generation_request,
@@ -1045,8 +1050,8 @@ async def verify_model_availability(
     return _success_response(data=payload, request_id=request_id)
 
 
-@mcp.tool("image_get_style_availability")
-def get_nanobot_profile() -> str:
+@mcp.tool("image_get_contract_info")
+async def get_nanobot_profile() -> str:
     """
     Return machine-readable server profile for nanobot orchestration.
 
@@ -1070,7 +1075,7 @@ def get_nanobot_profile() -> str:
     )
 
 
-@mcp.tool("image_list_recent")
+@mcp.tool("image_get_status")
 def get_security_metrics() -> str:
     """
     Return in-memory security counters/events for audit and incident triage.
@@ -1095,7 +1100,7 @@ def get_security_metrics() -> str:
     )
 
 
-@mcp.tool("image_get_metadata")
+@mcp.tool("image_clear_status")
 def clear_security_metrics() -> str:
     """
     Clear in-memory security counters/events and return reset summary.
@@ -1103,7 +1108,7 @@ def clear_security_metrics() -> str:
     Use when starting a new diagnostic window or incident timeline.
     """
     request_id = _new_request_id()
-    cleared = clear_security_metrics_snapshot()
+    cleared = clear_security_metrics_util()
     return _success_response(
         data={
             "operation": "clear_security_metrics",
@@ -1118,7 +1123,7 @@ def clear_security_metrics() -> str:
     )
 
 
-@mcp.tool("image_generate")
+@mcp.tool("image_get_system_info")
 def get_security_posture() -> str:
     """
     Return effective runtime security posture for auditability.
@@ -1133,12 +1138,12 @@ def get_security_posture() -> str:
     request_id = _new_request_id()
 
     allowed_roots = [str(root) for root in get_allowed_working_roots()]
-    root_sandbox_disabled = _env_bool("PERCIVAL_IMAGE_MCP_DISABLE_ROOT_SANDBOX", False)
-    allow_remote_http = _env_bool("PERCIVAL_IMAGE_MCP_ALLOW_REMOTE_HTTP", False)
-    allow_private_provider = _env_bool("PERCIVAL_IMAGE_MCP_ALLOW_PRIVATE_PROVIDER_URL", False)
-    allow_insecure_provider = _env_bool("PERCIVAL_IMAGE_MCP_ALLOW_INSECURE_PROVIDER_URL", False)
-    allow_private_downloads = _env_bool("PERCIVAL_IMAGE_MCP_ALLOW_PRIVATE_DOWNLOADS", False)
-    allow_http_downloads = _env_bool("PERCIVAL_IMAGE_MCP_ALLOW_HTTP_DOWNLOADS", False)
+    root_sandbox_disabled = get_env_bool("PERCIVAL_IMAGE_MCP_DISABLE_ROOT_SANDBOX", False)
+    allow_remote_http = get_env_bool("PERCIVAL_IMAGE_MCP_ALLOW_REMOTE_HTTP", False)
+    allow_private_provider = get_env_bool("PERCIVAL_IMAGE_MCP_ALLOW_PRIVATE_PROVIDER_URL", False)
+    allow_insecure_provider = get_env_bool("PERCIVAL_IMAGE_MCP_ALLOW_INSECURE_PROVIDER_URL", False)
+    allow_private_downloads = get_env_bool("PERCIVAL_IMAGE_MCP_ALLOW_PRIVATE_DOWNLOADS", False)
+    allow_http_downloads = get_env_bool("PERCIVAL_IMAGE_MCP_ALLOW_HTTP_DOWNLOADS", False)
     default_output_dir = _get_default_output_directory()
 
     warnings: list[str] = []
@@ -1178,25 +1183,25 @@ def get_security_posture() -> str:
             "allow_private_downloads": allow_private_downloads,
             "allow_http_downloads": allow_http_downloads,
             "allowed_download_hosts": os.getenv("PERCIVAL_IMAGE_MCP_ALLOWED_DOWNLOAD_HOSTS", ""),
-            "download_max_bytes": _env_int("PERCIVAL_IMAGE_MCP_DOWNLOAD_MAX_BYTES", 25 * 1024 * 1024),
+            "download_max_bytes": get_env_int("PERCIVAL_IMAGE_MCP_DOWNLOAD_MAX_BYTES", 25 * 1024 * 1024),
         },
         "input_limits": {
-            "max_prompt_chars": _env_int("PERCIVAL_IMAGE_MCP_MAX_PROMPT_CHARS", DEFAULT_MAX_PROMPT_CHARS),
-            "max_negative_prompt_chars": _env_int(
+            "max_prompt_chars": get_env_int("PERCIVAL_IMAGE_MCP_MAX_PROMPT_CHARS", DEFAULT_MAX_PROMPT_CHARS),
+            "max_negative_prompt_chars": get_env_int(
                 "PERCIVAL_IMAGE_MCP_MAX_NEGATIVE_PROMPT_CHARS",
                 DEFAULT_MAX_NEGATIVE_PROMPT_CHARS,
             ),
-            "max_filename_prefix_chars": _env_int(
+            "max_filename_prefix_chars": get_env_int(
                 "PERCIVAL_IMAGE_MCP_MAX_FILENAME_PREFIX_CHARS",
                 DEFAULT_MAX_FILENAME_PREFIX_CHARS,
             ),
-            "max_model_id_chars": _env_int("PERCIVAL_IMAGE_MCP_MAX_MODEL_ID_CHARS", DEFAULT_MAX_MODEL_ID_CHARS),
-            "max_list_files": _env_int("PERCIVAL_IMAGE_MCP_MAX_LIST_FILES", DEFAULT_MAX_LIST_FILES),
-            "max_analysis_prompt_chars": _env_int(
+            "max_model_id_chars": get_env_int("PERCIVAL_IMAGE_MCP_MAX_MODEL_ID_CHARS", DEFAULT_MAX_MODEL_ID_CHARS),
+            "max_list_files": get_env_int("PERCIVAL_IMAGE_MCP_MAX_LIST_FILES", DEFAULT_MAX_LIST_FILES),
+            "max_analysis_prompt_chars": get_env_int(
                 "PERCIVAL_IMAGE_MCP_MAX_ANALYSIS_PROMPT_CHARS",
                 4000,
             ),
-            "max_comparison_focus_chars": _env_int(
+            "max_comparison_focus_chars": get_env_int(
                 "PERCIVAL_IMAGE_MCP_MAX_COMPARISON_FOCUS_CHARS",
                 200,
             ),
@@ -1215,11 +1220,11 @@ def get_security_posture() -> str:
     )
 
 
-@mcp.tool("image_edit")
+@mcp.tool("image_generate")
 async def generate_image(
     working_dir: str,
     prompt: str,
-    model: str = "venice-sd35",
+    model: str = "flux-2-pro",
     size: str = "1024x1024",
     aspect_ratio: Optional[str] = None,
     resolution: Optional[str] = None,
@@ -1335,7 +1340,7 @@ async def generate_image(
     except Exception as e:
         return _error_response(f"Erro ao gerar imagem: {e}", request_id=request_id)
 
-@mcp.tool("image_upscale")
+@mcp.tool("image_edit")
 async def edit_image(
     working_dir: str,
     image_path: str,
@@ -1454,8 +1459,7 @@ def create_image_variations(
     return "Aviso: A criação de variações de imagem permanece desativada neste servidor."
 
 
-@mcp.tool("image_remove_background")
-
+@mcp.tool("image_list_recent")
 async def list_generated_images(working_dir: str, directory: Optional[str] = None) -> str:
     """List images in a specific directory (within working_dir scope)."""
     request_id = _new_request_id()
@@ -1499,7 +1503,7 @@ async def list_generated_images(working_dir: str, directory: Optional[str] = Non
         return _error_response(f"Error listing images: {e}", request_id=request_id)
 
 
-@mcp.tool("image_get_security_metrics")
+@mcp.tool("image_get_metadata")
 async def get_image_metadata(image_path: str, working_dir: str) -> str:
     """Return dimensions and metadata for a specific image."""
     request_id = _new_request_id()
@@ -1517,40 +1521,3 @@ async def get_image_metadata(image_path: str, working_dir: str) -> str:
         logger.error(f"Error in get_image_metadata: {e}")
         return _error_response(f"Error getting metadata: {e}", request_id=request_id)
 
-
-@mcp.tool("image_get_status")
-async def get_security_metrics() -> str:
-    """Return in-memory security counters for audit."""
-    from utils.security_utils import get_security_metrics_snapshot
-    request_id = _new_request_id()
-    return _success_response(data={"metrics": get_security_metrics_snapshot()}, request_id=request_id)
-
-
-@mcp.tool("image_list_dirs")
-async def clear_security_metrics() -> str:
-    """Clear in-memory security counters."""
-    from utils.security_utils import clear_security_metrics as clear_metrics
-    request_id = _new_request_id()
-    return _success_response(data=clear_metrics(), request_id=request_id)
-
-
-@mcp.tool("image_get_system_info")
-async def get_security_posture() -> str:
-    """Return effective runtime security configuration."""
-    from utils.security_utils import get_security_posture as get_posture
-    request_id = _new_request_id()
-    return _success_response(data={"posture": get_posture()}, request_id=request_id)
-
-
-@mcp.tool("image_get_contract_info")
-async def get_nanobot_profile() -> str:
-    """Return machine-readable server profile for nanobot orchestration."""
-    request_id = _new_request_id()
-    return _success_response(
-        data={
-            "contract_version": CONTRACT_VERSION,
-            "server_name": SERVER_NAME,
-            "workflows": ["recommendation -> verification -> execution"],
-        },
-        request_id=request_id
-    )
