@@ -1,7 +1,6 @@
 import inspect
 import json
 import time
-import os
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,7 +21,6 @@ from utils.path_utils import validate_image_path, validate_working_directory, is
 from utils.security_utils import (
     redact_sensitive_structure,
     redact_sensitive_text,
-    record_security_event,
     sanitize_untrusted_text,
 )
 
@@ -112,6 +110,8 @@ async def _analyze_image_with_cache(
     prompt: str,
     operation: str,
     params: dict[str, Any],
+    model: Optional[str] = None,
+    max_tokens: int = 1000,
 ) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]]]:
     """Analyze image with caching support (async)."""
     cache = get_cache()
@@ -132,7 +132,7 @@ async def _analyze_image_with_cache(
     try:
         base64_image = encode_image_to_base64(resolved_path)
         image_format = str(image_info.get("format", "jpeg")).lower()
-        vision_model = get_jarvina_vision_model()
+        vision_model = model or get_jarvina_vision_model()
         client = get_client()
 
         response = await client.chat.completions.create(
@@ -146,7 +146,7 @@ async def _analyze_image_with_cache(
                     ],
                 }
             ],
-            max_tokens=1000,
+            max_tokens=max_tokens,
         )
 
         description = response.choices[0].message.content
@@ -168,8 +168,14 @@ async def _analyze_image_with_cache(
         return None, {"error": f"Analysis failed: {exc}", "code": "vision_request_failed"}
 
 
-@mcp.tool()
-async def describe_image(working_dir: str, image_path: str, prompt: str = "Please describe this image in detail.") -> str:
+@mcp.tool("image_describe")
+async def describe_image(
+    working_dir: str,
+    image_path: str,
+    prompt: str = "Please describe this image in detail.",
+    model: Optional[str] = None,
+    max_tokens: Optional[int] = None,
+) -> str:
     """Analyze one image with the configured vision model."""
     request_id = _new_request_id()
     try:
@@ -189,7 +195,15 @@ async def describe_image(working_dir: str, image_path: str, prompt: str = "Pleas
         if not is_relative_to(resolved_path, working_path):
              return _error_response(error="Path escape blocked", code="invalid_image_path_scope", request_id=request_id)
 
-        analysis_data, analysis_error = await _analyze_image_with_cache(resolved_path, sanitized_prompt, "describe", {"prompt": sanitized_prompt})
+        analysis_params = {"prompt": sanitized_prompt, "model": model, "max_tokens": max_tokens}
+        analysis_data, analysis_error = await _analyze_image_with_cache(
+            resolved_path,
+            sanitized_prompt,
+            "describe",
+            analysis_params,
+            model=model,
+            max_tokens=max_tokens or 1000,
+        )
         if analysis_error:
             return _error_response(error=analysis_error["error"], code=analysis_error["code"], request_id=request_id)
 
@@ -198,8 +212,14 @@ async def describe_image(working_dir: str, image_path: str, prompt: str = "Pleas
         return _error_response(error=f"Error analyzing image: {exc}", code="describe_image_failed", request_id=request_id)
 
 
-@mcp.tool()
-async def analyze_image_content(working_dir: str, image_path: str, analysis_type: str = "general") -> str:
+@mcp.tool("image_analyze")
+async def analyze_image_content(
+    working_dir: str,
+    image_path: str,
+    analysis_type: str = "general",
+    model: Optional[str] = None,
+    max_tokens: Optional[int] = None,
+) -> str:
     """Analyze specific aspects of an image using predefined prompts."""
     request_id = _new_request_id()
     prompts = {
@@ -224,7 +244,15 @@ async def analyze_image_content(working_dir: str, image_path: str, analysis_type
             return _error_response(error=error_message or "Invalid image_path.", code="invalid_image_path", request_id=request_id)
 
         prompt = prompts[analysis_type]
-        analysis_data, analysis_error = await _analyze_image_with_cache(resolved_path, prompt, "analyze", {"type": analysis_type})
+        analysis_params = {"type": analysis_type, "model": model, "max_tokens": max_tokens}
+        analysis_data, analysis_error = await _analyze_image_with_cache(
+            resolved_path,
+            prompt,
+            "analyze",
+            analysis_params,
+            model=model,
+            max_tokens=max_tokens or 1000,
+        )
         if analysis_error:
             return _error_response(error=analysis_error["error"], code=analysis_error["code"], request_id=request_id)
 
@@ -233,20 +261,36 @@ async def analyze_image_content(working_dir: str, image_path: str, analysis_type
         return _error_response(error=f"Error analyzing image: {exc}", code="analyze_image_content_failed", request_id=request_id)
 
 
-@mcp.tool()
-async def compare_images(working_dir: str, image1_path: str, image2_path: str, comparison_focus: str = "similarities and differences") -> str:
+@mcp.tool("image_compare")
+async def compare_images(
+    working_dir: str,
+    image1_path: str,
+    image2_path: str,
+    comparison_focus: str = "similarities and differences",
+    model: Optional[str] = None,
+) -> str:
     """Compare two images (async)."""
     request_id = _new_request_id()
     try:
         prompt = f"Describe this image focusing on {comparison_focus}."
         
         # We call describe_image directly (it's async now)
-        res1_raw = await describe_image(working_dir=working_dir, image_path=image1_path, prompt=prompt)
+        res1_raw = await describe_image(
+            working_dir=working_dir,
+            image_path=image1_path,
+            prompt=prompt,
+            model=model,
+        )
         res1 = json.loads(res1_raw)
         if not res1.get("ok"):
              return _error_response(error=f"Image 1 error: {res1.get('error')}", code="compare_image1_failed", request_id=request_id)
 
-        res2_raw = await describe_image(working_dir=working_dir, image_path=image2_path, prompt=prompt)
+        res2_raw = await describe_image(
+            working_dir=working_dir,
+            image_path=image2_path,
+            prompt=prompt,
+            model=model,
+        )
         res2 = json.loads(res2_raw)
         if not res2.get("ok"):
              return _error_response(error=f"Image 2 error: {res2.get('error')}", code="compare_image2_failed", request_id=request_id)
@@ -257,7 +301,7 @@ async def compare_images(working_dir: str, image1_path: str, image2_path: str, c
         return _error_response(error=f"Error comparing images: {exc}", code="compare_images_failed", request_id=request_id)
 
 
-@mcp.tool()
+@mcp.tool("image_get_cache_info")
 async def get_cache_info() -> str:
     """Return image-analysis cache statistics."""
     request_id = _new_request_id()
@@ -268,7 +312,7 @@ async def get_cache_info() -> str:
         return _error_response(error=str(exc), code="get_cache_info_failed", request_id=request_id)
 
 
-@mcp.tool()
+@mcp.tool("image_clear_cache")
 async def clear_image_cache() -> str:
     """Clear all cached image-analysis results."""
     request_id = _new_request_id()

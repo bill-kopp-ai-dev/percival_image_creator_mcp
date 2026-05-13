@@ -1,5 +1,4 @@
 import os
-from typing import Optional
 
 def get_env_bool(var_name: str, default: bool = False) -> bool:
     """Retrieve an environment variable as a boolean."""

@@ -217,11 +217,11 @@ def validate_image_path(file_path: str, operation: str = "access", base_dir: str
                 
                 if not is_absolute:
                     error_msg += f"• Base directory: '{effective_base}'\n"
-                    error_msg += f"• Note: Relative paths are resolved from the directory where you're running the client\n"
+                    error_msg += "• Note: Relative paths are resolved from the directory where you're running the client\n"
                 
                 error_msg += (
-                    f"• Suggestion: Verify the file exists and path is correct. "
-                    f"Use absolute paths (starting with '/') for files outside your current directory."
+                    "• Suggestion: Verify the file exists and path is correct. "
+                    "Use absolute paths (starting with '/') for files outside your current directory."
                 )
                 
                 return False, error_msg, None
@@ -237,7 +237,7 @@ def validate_image_path(file_path: str, operation: str = "access", base_dir: str
                 if not is_absolute:
                     error_msg += f"• Base directory: '{effective_base}'\n"
                 
-                error_msg += f"• Suggestion: Provide a path to an image file, not a directory."
+                error_msg += "• Suggestion: Provide a path to an image file, not a directory."
                 
                 return False, error_msg, None
         
@@ -254,7 +254,7 @@ def validate_image_path(file_path: str, operation: str = "access", base_dir: str
                 if not is_absolute:
                     error_msg += f"• Base directory: '{effective_base}'\n"
                 
-                error_msg += f"• Suggestion: Create the directory first or use an existing directory path."
+                error_msg += "• Suggestion: Create the directory first or use an existing directory path."
                 
                 return False, error_msg, None
             
@@ -268,7 +268,7 @@ def validate_image_path(file_path: str, operation: str = "access", base_dir: str
                 if not is_absolute:
                     error_msg += f"• Base directory: '{effective_base}'\n"
                 
-                error_msg += f"• Suggestion: Ensure the parent path is a valid directory."
+                error_msg += "• Suggestion: Ensure the parent path is a valid directory."
                 
                 return False, error_msg, None
         
@@ -285,9 +285,9 @@ def validate_image_path(file_path: str, operation: str = "access", base_dir: str
             error_msg += f"• Base directory: '{effective_base}'\n"
         
         error_msg += (
-            f"• Suggestion: Use a valid file path. Examples:\n"
-            f"  - Relative: 'images/photo.jpg' or './images/photo.jpg'\n"
-            f"  - Absolute: '/home/user/images/photo.jpg'"
+            "• Suggestion: Use a valid file path. Examples:\n"
+            "  - Relative: 'images/photo.jpg' or './images/photo.jpg'\n"
+            "  - Absolute: '/home/user/images/photo.jpg'"
         )
         
         return False, error_msg, None 

@@ -6,7 +6,6 @@ import re
 import socket
 from ipaddress import ip_address
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 from typing import Optional
 from urllib.parse import urlparse
@@ -16,13 +15,13 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 from PIL import Image
 
-from utils.config import get_env_bool, get_env_int, get_env_str
+from utils.config import get_env_bool, get_env_int
 from utils.security_utils import record_security_event
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_JARVINA_BASE_URL = "https://api.openai.com/v1"
-DEFAULT_JARVINA_VISION_MODEL = "qwen-2.5-vl"
+DEFAULT_JARVINA_VISION_MODEL = "qwen3-5-9b"
 DEFAULT_DOWNLOAD_MAX_BYTES = 25 * 1024 * 1024
 DEFAULT_PROVIDER_TIMEOUT_SECONDS = 90
 SUPPORTED_IMAGE_TRANSPORTS = {"auto", "openai_compat", "venice_native"}

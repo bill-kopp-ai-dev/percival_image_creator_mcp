@@ -10,7 +10,7 @@ from typing import Any, Optional
 from uuid import uuid4
 
 from server import mcp
-from utils.config import get_env_bool, get_env_int, get_env_str
+from utils.config import get_env_int, get_env_str
 from utils.client import (
     jarvina_client as client,
     generate_images_with_transport,
@@ -20,7 +20,6 @@ from utils.client import (
     save_base64_image,
     download_image_from_url,
     ImageStyle,
-    ImagePayload,
     GenerationResponse,
 )
 from utils.model_catalog import (
@@ -36,7 +35,6 @@ from utils.path_utils import (
     validate_image_path, 
     validate_working_directory,
     sanitize_input_text,
-    enforce_path_within_working_dir,
     is_relative_to
 )
 from utils.security_utils import (
@@ -722,7 +720,7 @@ def _compute_tier_alignment_score(
         return exact_bonus
     if diff == 1:
         return near_bonus
-@mcp.tool()
+@mcp.tool("image_recommend_model")
 async def recommend_model_for_intent(
     task_type: str = "text_to_image",
     intent: str = "",
@@ -904,7 +902,7 @@ async def recommend_model_for_intent(
         return _error_response(f"Erro ao recomendar modelos: {exc}", request_id=request_id)
 
 
-@mcp.tool()
+@mcp.tool("image_list_models")
 async def list_model_cards(
     task_type: str = "text_to_image",
     include_inactive: bool = False,
@@ -941,7 +939,7 @@ async def list_model_cards(
         return _error_response(f"Erro ao listar model cards: {exc}", request_id=request_id)
 
 
-@mcp.tool()
+@mcp.tool("image_get_model")
 async def get_model_card(model_id: str, fields: Optional[str] = None) -> str:
     """Return a single model card from the local catalog."""
     request_id = _new_request_id()
@@ -979,7 +977,7 @@ async def get_model_card(model_id: str, fields: Optional[str] = None) -> str:
         )
 
 
-@mcp.tool()
+@mcp.tool("image_list_provider_models")
 async def list_image_styles(
     force_refresh: bool = False,
     limit: int = 50,
@@ -1007,7 +1005,7 @@ async def list_image_styles(
         return _error_response(f"Erro ao buscar estilos: {exc}", request_id=request_id)
 
 
-@mcp.tool()
+@mcp.tool("image_get_model_availability")
 async def list_available_models(force_refresh: bool = False) -> str:
     """List currently available model IDs from the configured provider."""
     request_id = _new_request_id()
@@ -1027,7 +1025,7 @@ async def list_available_models(force_refresh: bool = False) -> str:
         return _error_response(f"Erro ao buscar modelos: {e}", request_id=request_id)
 
 
-@mcp.tool()
+@mcp.tool("image_list_styles")
 async def verify_model_availability(
     model_id: str,
     task_type: str = "text_to_image",
@@ -1047,7 +1045,7 @@ async def verify_model_availability(
     return _success_response(data=payload, request_id=request_id)
 
 
-@mcp.tool()
+@mcp.tool("image_get_style_availability")
 def get_nanobot_profile() -> str:
     """
     Return machine-readable server profile for nanobot orchestration.
@@ -1072,7 +1070,7 @@ def get_nanobot_profile() -> str:
     )
 
 
-@mcp.tool()
+@mcp.tool("image_list_recent")
 def get_security_metrics() -> str:
     """
     Return in-memory security counters/events for audit and incident triage.
@@ -1097,7 +1095,7 @@ def get_security_metrics() -> str:
     )
 
 
-@mcp.tool()
+@mcp.tool("image_get_metadata")
 def clear_security_metrics() -> str:
     """
     Clear in-memory security counters/events and return reset summary.
@@ -1120,7 +1118,7 @@ def clear_security_metrics() -> str:
     )
 
 
-@mcp.tool()
+@mcp.tool("image_generate")
 def get_security_posture() -> str:
     """
     Return effective runtime security posture for auditability.
@@ -1217,7 +1215,7 @@ def get_security_posture() -> str:
     )
 
 
-@mcp.tool()
+@mcp.tool("image_edit")
 async def generate_image(
     working_dir: str,
     prompt: str,
@@ -1337,7 +1335,7 @@ async def generate_image(
     except Exception as e:
         return _error_response(f"Erro ao gerar imagem: {e}", request_id=request_id)
 
-@mcp.tool()
+@mcp.tool("image_upscale")
 async def edit_image(
     working_dir: str,
     image_path: str,
@@ -1456,7 +1454,7 @@ def create_image_variations(
     return "Aviso: A criação de variações de imagem permanece desativada neste servidor."
 
 
-@mcp.tool()
+@mcp.tool("image_remove_background")
 
 async def list_generated_images(working_dir: str, directory: Optional[str] = None) -> str:
     """List images in a specific directory (within working_dir scope)."""
@@ -1501,7 +1499,7 @@ async def list_generated_images(working_dir: str, directory: Optional[str] = Non
         return _error_response(f"Error listing images: {e}", request_id=request_id)
 
 
-@mcp.tool()
+@mcp.tool("image_get_security_metrics")
 async def get_image_metadata(image_path: str, working_dir: str) -> str:
     """Return dimensions and metadata for a specific image."""
     request_id = _new_request_id()
@@ -1520,7 +1518,7 @@ async def get_image_metadata(image_path: str, working_dir: str) -> str:
         return _error_response(f"Error getting metadata: {e}", request_id=request_id)
 
 
-@mcp.tool()
+@mcp.tool("image_get_status")
 async def get_security_metrics() -> str:
     """Return in-memory security counters for audit."""
     from utils.security_utils import get_security_metrics_snapshot
@@ -1528,7 +1526,7 @@ async def get_security_metrics() -> str:
     return _success_response(data={"metrics": get_security_metrics_snapshot()}, request_id=request_id)
 
 
-@mcp.tool()
+@mcp.tool("image_list_dirs")
 async def clear_security_metrics() -> str:
     """Clear in-memory security counters."""
     from utils.security_utils import clear_security_metrics as clear_metrics
@@ -1536,7 +1534,7 @@ async def clear_security_metrics() -> str:
     return _success_response(data=clear_metrics(), request_id=request_id)
 
 
-@mcp.tool()
+@mcp.tool("image_get_system_info")
 async def get_security_posture() -> str:
     """Return effective runtime security configuration."""
     from utils.security_utils import get_security_posture as get_posture
@@ -1544,7 +1542,7 @@ async def get_security_posture() -> str:
     return _success_response(data={"posture": get_posture()}, request_id=request_id)
 
 
-@mcp.tool()
+@mcp.tool("image_get_contract_info")
 async def get_nanobot_profile() -> str:
     """Return machine-readable server profile for nanobot orchestration."""
     request_id = _new_request_id()
